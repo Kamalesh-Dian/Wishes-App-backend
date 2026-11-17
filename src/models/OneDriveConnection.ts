@@ -2,19 +2,14 @@ import mongoose, { Document, Schema } from "mongoose";
 
 export interface IOneDriveConnection extends Document {
   userId: string;
-
   fileId: string;
-
   fileName: string;
-
   syncEnabled: boolean;
-
   accessToken?: string;
-
+  needsReconnect: boolean;
+  lastError?: string;
   lastSync?: Date;
-
   createdAt: Date;
-
   updatedAt: Date;
 }
 
@@ -25,24 +20,28 @@ const OneDriveConnectionSchema = new Schema(
       required: true,
       unique: true,
     },
-
     fileId: {
       type: String,
       required: true,
     },
-
     fileName: {
       type: String,
       required: true,
     },
-
     syncEnabled: {
       type: Boolean,
       default: true,
     },
-
-    accessToken: String,
-
+    accessToken: {
+      type: String, // Stored encrypted with AES-256-GCM
+    },
+    needsReconnect: {
+      type: Boolean,
+      default: false,
+    },
+    lastError: {
+      type: String,
+    },
     lastSync: Date,
   },
   {

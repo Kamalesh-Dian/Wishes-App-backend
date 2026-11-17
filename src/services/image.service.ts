@@ -1,5 +1,6 @@
 import { generateWithGemini } from "./providers/gemini.service";
 import { generateWithFlux } from "./providers/flux.service";
+import { logger } from "../utils/logger";
 
 export interface GeneratedImage {
   base64: string;
@@ -11,7 +12,7 @@ export async function generateImage(
   uploadedImage?: string,
   aiEngine?: string,
 ): Promise<GeneratedImage> {
-  console.log("Selected AI Engine:", aiEngine);
+  logger.debug({ aiEngine }, "Dispatching image generation request");
 
   switch (aiEngine?.toLowerCase()) {
     case "flux":

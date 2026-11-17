@@ -1,86 +1,117 @@
 import type { AuthRequest } from "../middleware/auth";
 import type { Response } from "express";
+import { z } from "zod";
 import { buildFluxPrompt } from "../services/promptBuilder";
 import { generateImage } from "../services/image.service";
-import {uploadToCloudinary} from "../services/cloudinary.service"
-
+import { uploadToCloudinary } from "../services/cloudinary.service";
 import Wish from "../models/Wish";
+import { logger } from "../utils/logger";
+
+const generateWishSchema = z.object({
+  occasion: z.string().trim().min(1, "Occasion is required"),
+  theme: z.string().trim().min(1, "Theme is required"),
+  people: z.array(z.string()).default([]),
+  decorations: z.array(z.string()).default([]),
+  aiEngine: z.enum(["gemini", "openai", "flux"]).default("gemini"),
+  uploadedImage: z
+    .string()
+    .refine(
+      (val) => {
+        if (!val) return true;
+        if (!val.startsWith("data:image/")) return false;
+        const commaIdx = val.indexOf(",");
+        if (commaIdx === -1) return false;
+        const sizeInBytes = (val.length - commaIdx - 1) * 0.75;
+        return sizeInBytes <= 5 * 1024 * 1024;
+      },
+      { message: "Uploaded image must be a valid image data URL under 5 MB" }
+    )
+    .optional(),
+  additionalInformation: z
+    .string()
+    .max(100, "Additional information must be under 100 characters")
+    .optional(),
+  customMessage: z.string().optional(),
+  animationEnabled: z.boolean().optional().default(false),
+});
 
 export async function generateWish(req: AuthRequest, res: Response) {
   try {
-    console.log("================================");
-    console.log("REQUEST RECEIVED");
-    if (req.body.additionalInformation?.length > 100) {
-      return res.status(400).json({
+    const userId = req.user?.uid;
+    if (!userId) {
+      return res.status(401).json({
         success: false,
-        error: "Additional information must be under 100 characters",
+        error: "Unauthorized",
       });
     }
-    let prompt = "";
 
-    switch (req.body.aiEngine) {
-      case "flux":
-        prompt = buildFluxPrompt(req.body);
-        break;
-
-      case "gemini":
-        prompt = buildFluxPrompt(req.body);
-        break;
+    // 1. Validate request body with Zod
+    const validation = generateWishSchema.safeParse(req.body);
+    if (!validation.success) {
+      return res.status(400).json({
+        success: false,
+        error: "Validation error",
+        details: validation.error.flatten().fieldErrors,
+      });
     }
 
-    console.log("Prompt Length:", prompt.length);
-    console.log("Uploaded Image Exists:", !!req.body.uploadedImage);
-    console.log("Uploaded Image Length:", req.body.uploadedImage?.length);
+    const data = validation.data;
 
-    console.log("Generating image...");
+    // 2. Daily per-user generation cap
+    const dailyLimit = parseInt(process.env.DAILY_GENERATION_LIMIT || "20", 10);
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
 
-    const image = await generateImage(prompt, req.body.uploadedImage, req.body.aiEngine);
+    const todayCount = await Wish.countDocuments({
+      user: userId,
+      createdAt: { $gte: startOfDay },
+    });
 
-    console.log("Image Generated");
-    console.log("Generated Base64 Length:", image.base64.length);
-    console.log("Generated Mime Type:", image.mimeType);
+    if (todayCount >= dailyLimit) {
+      return res.status(429).json({
+        success: false,
+        error: `Daily generation limit of ${dailyLimit} wishes reached. Please try again tomorrow.`,
+      });
+    }
 
-    console.log("Saving Wish...");
+    // 3. Build AI generation prompt
+    const prompt = buildFluxPrompt(data);
+
+    // 4. Generate AI image
+    const image = await generateImage(prompt, data.uploadedImage, data.aiEngine);
+
+    // 5. Upload result to Cloudinary
     const imageUrl = await uploadToCloudinary(
-      `data:${image.mimeType};base64,${image.base64}`,
+      `data:${image.mimeType};base64,${image.base64}`
     );
+
+    // 6. Persist Wish record
     const wish = await Wish.create({
-      user: req.user?.uid,
-      occasion: req.body.occasion,
-      theme: req.body.theme,
+      user: userId,
+      occasion: data.occasion,
+      theme: data.theme,
       generatedImage: imageUrl,
-      people: req.body.people,
-      decorations: req.body.decorations,
-      customMessage: req.body.customMessage,
-      animationEnabled: req.body.animationEnabled,
-      aiProvider:req.body.aiEngine, 
+      people: data.people,
+      decorations: data.decorations,
+      customMessage: data.customMessage,
+      animationEnabled: data.animationEnabled,
+      aiProvider: data.aiEngine,
       prompt,
     });
 
-    console.log("Wish Saved:", wish._id);
-
-    res.json({
+    return res.json({
       success: true,
       imageURL: imageUrl,
       mimeType: image.mimeType,
       wishId: wish._id,
     });
   } catch (error) {
-    console.log("================================");
-    console.log("ERROR OCCURRED");
+    // Sanitize error logging and client response to avoid leaking upstream API details
+    logger.error({ err: error instanceof Error ? error.message : error }, "Wish generation failed");
 
-    if (error instanceof Error) {
-      console.log("Message:", error.message);
-
-      console.log("Stack:", error.stack);
-    } else {
-      console.log(error);
-    }
-
-    res.status(500).json({
+    return res.status(500).json({
       success: false,
-
-      error: error instanceof Error ? error.message : "Unknown Error",
+      error: "An error occurred while generating your wish. Please try again later.",
     });
   }
 }

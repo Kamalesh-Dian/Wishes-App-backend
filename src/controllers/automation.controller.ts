@@ -1,7 +1,7 @@
 import type { Response } from "express";
 import type { AuthRequest } from "../middleware/auth";
-
 import { generateEventWish } from "../services/automation/automation.service";
+import { logger } from "../utils/logger";
 
 export async function generateAutomation(req: AuthRequest, res: Response) {
   try {
@@ -17,12 +17,13 @@ export async function generateAutomation(req: AuthRequest, res: Response) {
     const result = await generateEventWish(eventId);
 
     return res.json(result);
-  } catch (error: any) {
-    console.error(error);
+  } catch (error: unknown) {
+    const err = error as { message?: string };
+    logger.error({ err: err?.message || error }, "Error generating automation wish");
 
     return res.status(500).json({
       success: false,
-      message: error.message,
+      message: err?.message || "Internal server error",
     });
   }
 }

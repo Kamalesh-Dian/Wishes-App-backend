@@ -2,6 +2,7 @@ import { Router } from "express";
 import Wish from "../models/Wish";
 import { auth } from "../middleware/auth";
 import type { AuthRequest } from "../middleware/auth";
+import { logger } from "../utils/logger";
 
 const router = Router();
 
@@ -20,7 +21,7 @@ router.get("/", auth, async (req: AuthRequest, res) => {
 
     res.json(wishes);
   } catch (error) {
-    console.error(error);
+    logger.error({ err: error }, "Failed to fetch wish history");
 
     res.status(500).json({
       success: false,
@@ -49,7 +50,7 @@ router.delete("/:id", auth, async (req: AuthRequest, res) => {
       success: true,
     });
   } catch (error) {
-    console.error(error);
+    logger.error({ err: error }, "Failed to delete wish");
 
     res.status(500).json({
       success: false,
@@ -75,7 +76,7 @@ router.delete("/", auth, async (req: AuthRequest, res) => {
       success: true,
     });
   } catch (error) {
-    console.error(error);
+    logger.error({ err: error }, "Failed to batch delete wishes");
 
     res.status(500).json({
       success: false,

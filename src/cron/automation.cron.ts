@@ -1,24 +1,23 @@
 import cron from "node-cron";
-
-import { generateTodayEvents } from "../services/automation/scheduler.service";
+import { generateTodayEvents, isSchedulerRunning } from "../services/automation/scheduler.service";
+import { logger } from "../utils/logger";
 
 export function startAutomationCron() {
-  console.log("Automation Cron Started");
+  logger.info("Automation cron scheduler initialized (runs every 5 minutes)");
 
   cron.schedule("*/5 * * * *", async () => {
-    console.log("==========================");
-    console.log("Automation Started");
-    console.log(new Date());
+    if (isSchedulerRunning()) {
+      logger.info("Automation cron skipped: a previous job is still running.");
+      return;
+    }
+
+    logger.debug("Automation cron job triggered");
 
     try {
       const count = await generateTodayEvents();
-
-      console.log(`Automation Completed`);
-      console.log(`${count} event(s) processed`);
+      logger.info({ processedEvents: count }, "Automation cron cycle completed");
     } catch (error) {
-      console.error(error);
+      logger.error({ err: error }, "Automation cron cycle error");
     }
-
-    console.log("==========================");
   });
 }

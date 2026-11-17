@@ -5,6 +5,37 @@ export interface EmailTemplateOptions {
   companyFooter?: string;
 }
 
+export function escapeHtml(str: string): string {
+  if (!str) return "";
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+export function isValidCloudinaryImageUrl(urlStr: string): boolean {
+  try {
+    const parsed = new URL(urlStr);
+    if (parsed.protocol !== "https:") return false;
+
+    // Check Cloudinary domain
+    if (parsed.hostname !== "res.cloudinary.com") {
+      return false;
+    }
+
+    const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
+    if (cloudName && !parsed.pathname.startsWith(`/${cloudName}/`)) {
+      return false;
+    }
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function buildWishTemplate(
   name: string,
   occasion: string,
@@ -12,13 +43,28 @@ export function buildWishTemplate(
   customMessage?: string,
   options?: EmailTemplateOptions,
 ) {
-  const accentColor = options?.accentColor || "#0d9488";
-  const headerText = options?.headerTitle
-    ? options.headerTitle.replace("{name}", name).replace("{occasion}", occasion)
-    : `🎉 Happy ${occasion} ${name}!`;
+  if (!isValidCloudinaryImageUrl(imageUrl)) {
+    throw new Error("Invalid image URL: Must be a secure Cloudinary image URL");
+  }
 
-  const signature = options?.signature || "Regards,\nAI Wishes Team";
-  const companyFooter = options?.companyFooter || "DIAN Technology Solutions";
+  const safeName = escapeHtml(name);
+  const safeOccasion = escapeHtml(occasion);
+  const safeCustomMessage = customMessage
+    ? escapeHtml(customMessage)
+    : "Wishing you success, happiness and wonderful memories.";
+
+  const rawHeader = options?.headerTitle || `🎉 Happy {occasion} {name}!`;
+  const safeHeader = escapeHtml(rawHeader)
+    .replace(/{name}/g, safeName)
+    .replace(/{occasion}/g, safeOccasion);
+
+  const safeSignature = escapeHtml(options?.signature || "Regards,\nAI Wishes Team");
+  const safeCompanyFooter = escapeHtml(options?.companyFooter || "DIAN Technology Solutions");
+
+  // Validate CSS hex color to prevent CSS injection
+  const accentColor = /^#[0-9a-fA-F]{3,8}$/.test(options?.accentColor || "")
+    ? options!.accentColor!
+    : "#0d9488";
 
   return `
 <!DOCTYPE html>
@@ -67,12 +113,12 @@ img {
 </head>
 <body>
 <div class="container">
-  <h2>${headerText}</h2>
-  <p>${customMessage || "Wishing you success, happiness and wonderful memories."}</p>
+  <h2>${safeHeader}</h2>
+  <p>${safeCustomMessage}</p>
   <img src="${imageUrl}" />
   <div class="footer">
-    ${signature}
-    <div class="company">${companyFooter}</div>
+    ${safeSignature}
+    <div class="company">${safeCompanyFooter}</div>
   </div>
 </div>
 </body>

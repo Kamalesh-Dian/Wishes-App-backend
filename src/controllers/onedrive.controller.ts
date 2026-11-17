@@ -3,8 +3,36 @@ import type { Response } from "express";
 import OneDriveConnection from "../models/OneDriveConnection";
 import { syncOneDriveEvents } from "../services/automation/sync.service";
 import Event from "../models/Event";
-import { parseExcel } from "../services/excel.service";
+import { parseExcel, type ParsedExcelEvent } from "../services/excel.service";
 import type { AuthRequest } from "../middleware/auth";
+import { encrypt, decrypt } from "../utils/encryption";
+import { logger } from "../utils/logger";
+
+export async function getOneDriveStatus(req: AuthRequest, res: Response) {
+  try {
+    const userId = req.user?.uid;
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "Unauthorized" });
+    }
+
+    const connection = await OneDriveConnection.findOne({ userId });
+    if (!connection) {
+      return res.json({ connected: false });
+    }
+
+    return res.json({
+      connected: true,
+      fileName: connection.fileName,
+      lastSync: connection.lastSync,
+      syncEnabled: connection.syncEnabled,
+      needsReconnect: connection.needsReconnect || false,
+      lastError: connection.lastError,
+    });
+  } catch (error) {
+    logger.error({ err: error }, "Failed to get OneDrive status");
+    res.status(500).json({ success: false });
+  }
+}
 
 export async function importOneDriveExcel(req: AuthRequest, res: Response) {
   try {
@@ -34,13 +62,18 @@ export async function importOneDriveExcel(req: AuthRequest, res: Response) {
       });
     }
 
+    // Encrypt token before persisting
+    const encryptedToken = encrypt(msToken);
+
     await OneDriveConnection.findOneAndUpdate(
       { userId },
       {
         fileId,
         fileName,
         syncEnabled: true,
-        accessToken: msToken,
+        accessToken: encryptedToken,
+        needsReconnect: false,
+        lastError: undefined,
       },
       {
         upsert: true,
@@ -48,11 +81,6 @@ export async function importOneDriveExcel(req: AuthRequest, res: Response) {
       },
     );
 
-    console.log("============================");
-    console.log("Downloading Excel...");
-    console.log("File Id:", fileId);
-
-    console.log("Fetching Excel metadata from Graph API...");
     const metadataResponse = await axios.get(
       `https://graph.microsoft.com/v1.0/me/drive/items/${fileId}`,
       {
@@ -67,20 +95,12 @@ export async function importOneDriveExcel(req: AuthRequest, res: Response) {
       throw new Error("Could not retrieve download URL for the Excel file from Graph API.");
     }
 
-    console.log("Downloading Excel content...");
     const response = await axios.get(downloadUrl, {
       responseType: "arraybuffer",
     });
 
-    console.log("Excel downloaded successfully");
-
     const buffer = Buffer.from(response.data);
-
-    console.log("Parsing Excel...");
-
     const rows = parseExcel(buffer);
-
-    console.log(`${rows.length} rows found`);
 
     // Filter duplicate rows (by Email and Occasion/EventType) inside the excel file
     const seen = new Set<string>();
@@ -107,56 +127,49 @@ export async function importOneDriveExcel(req: AuthRequest, res: Response) {
 
     const events = validRows.map((row: any) => ({
       userId,
-
       name: row.Name,
-
       email: row.Email,
-
       photoUrl: row.PhotoURL,
-
       occasion: row.EventType || row.Occasion,
-
       eventDate: row.EventDate,
-
       eventMonth: row.EventDate.getMonth() + 1,
-
       eventDay: row.EventDate.getDate(),
-
       department: row.Department,
-
       customMessage: row.CustomMessage,
-
       source: "onedrive",
-
       status: "pending",
     }));
 
-    console.log(`Saving ${events.length} unique events...`);
+    // Insert new events first to preserve existing data if insertion fails
+    const saved = await Event.insertMany(events);
+    const newIds = saved.map((e: any) => e._id);
 
+    // Clean up previous OneDrive events only after new events are safely saved
     await Event.deleteMany({
       userId,
       source: "onedrive",
+      _id: { $nin: newIds },
     });
-
-    const saved = await Event.insertMany(events);
-
-    console.log(`${saved.length} events imported`);
 
     return res.json(saved);
   } catch (error: any) {
-    console.log("============================");
-    console.log("IMPORT FAILED");
-
-    if (axios.isAxiosError(error)) {
-      console.log("Status:", error.response?.status);
-      console.log("Data:", error.response?.data);
+    if (axios.isAxiosError(error) && error.response?.status === 401) {
+      await OneDriveConnection.updateOne(
+        { userId: req.user?.uid },
+        { needsReconnect: true, lastError: "Microsoft session expired" }
+      );
+      return res.status(401).json({
+        success: false,
+        needsReconnect: true,
+        message: "Microsoft session expired. Please reconnect your OneDrive account.",
+      });
     }
 
-    console.error(error);
+    logger.error({ err: error }, "OneDrive Import Failed");
 
     return res.status(500).json({
       success: false,
-      message: error.message,
+      message: error instanceof Error ? error.message : "Failed to import OneDrive Excel",
     });
   }
 }
@@ -172,19 +185,6 @@ export async function syncOneDrive(req: AuthRequest, res: Response) {
       });
     }
 
-    const accessToken = req.headers["x-ms-token"] as string;
-
-    if (!accessToken) {
-      return res.status(400).json({
-        success: false,
-        message: "Microsoft Access Token Missing",
-      });
-    }
-
-    console.log("======================================");
-    console.log("Manual OneDrive Sync Requested");
-    console.log("User :", userId);
-
     const connection = await OneDriveConnection.findOne({
       userId,
       syncEnabled: true,
@@ -197,31 +197,60 @@ export async function syncOneDrive(req: AuthRequest, res: Response) {
       });
     }
 
-    const result = await syncOneDriveEvents(userId, accessToken);
+    let tokenToUse = req.headers["x-ms-token"] as string;
 
-    connection.accessToken = accessToken;
+    if (!tokenToUse && connection.accessToken) {
+      tokenToUse = decrypt(connection.accessToken);
+    }
+
+    if (!tokenToUse) {
+      connection.needsReconnect = true;
+      connection.lastError = "No Microsoft access token available.";
+      await connection.save();
+
+      return res.status(401).json({
+        success: false,
+        needsReconnect: true,
+        message: "Microsoft token missing. Please reconnect.",
+      });
+    }
+
+    const result = await syncOneDriveEvents(userId, tokenToUse);
+
+    // Save token if new token was passed
+    if (req.headers["x-ms-token"]) {
+      connection.accessToken = encrypt(req.headers["x-ms-token"] as string);
+    }
+    connection.needsReconnect = false;
+    connection.lastError = undefined;
     connection.lastSync = new Date();
 
     await connection.save();
 
     return res.json({
       success: true,
-
       fileName: connection.fileName,
-
       lastSync: connection.lastSync,
-
       summary: result,
     });
   } catch (error: any) {
-    console.error("======================================");
-    console.error("OneDrive Sync Failed");
+    if (axios.isAxiosError(error) && error.response?.status === 401) {
+      await OneDriveConnection.updateOne(
+        { userId: req.user?.uid },
+        { needsReconnect: true, lastError: "Microsoft session expired" }
+      );
+      return res.status(401).json({
+        success: false,
+        needsReconnect: true,
+        message: "Microsoft session expired. Please reconnect your OneDrive account.",
+      });
+    }
 
-    console.error(error);
+    logger.error({ err: error }, "OneDrive Sync Failed");
 
     return res.status(500).json({
       success: false,
-      message: error.message,
+      message: error instanceof Error ? error.message : "OneDrive synchronization failed",
     });
   }
 }
@@ -237,12 +266,18 @@ export async function previewOneDriveExcel(req: AuthRequest, res: Response) {
       return res.status(400).json({ success: false, message: "File Id missing" });
     }
 
-    const msToken = req.headers["x-ms-token"] as string;
+    let msToken = req.headers["x-ms-token"] as string;
+    if (!msToken) {
+      const connection = await OneDriveConnection.findOne({ userId });
+      if (connection?.accessToken) {
+        msToken = decrypt(connection.accessToken);
+      }
+    }
+
     if (!msToken) {
       return res.status(400).json({ success: false, message: "Microsoft Access Token missing" });
     }
 
-    console.log("Fetching Excel metadata for preview...");
     const metadataResponse = await axios.get(
       `https://graph.microsoft.com/v1.0/me/drive/items/${fileId}`,
       { headers: { Authorization: `Bearer ${msToken}` } }
@@ -251,33 +286,44 @@ export async function previewOneDriveExcel(req: AuthRequest, res: Response) {
     const downloadUrl = metadataResponse.data["@microsoft.graph.downloadUrl"];
     if (!downloadUrl) throw new Error("Could not retrieve download URL for preview.");
 
-    console.log("Downloading Excel content for preview...");
     const response = await axios.get(downloadUrl, { responseType: "arraybuffer" });
     const buffer = Buffer.from(response.data);
 
-    console.log("Parsing Excel for preview...");
     const rows = parseExcel(buffer);
 
-    const previewData = rows.slice(0, 15).map((row: any) => {
+    const previewData = rows.slice(0, 15).map((row: ParsedExcelEvent) => {
       let formattedDate = "";
       if (row.EventDate instanceof Date && !isNaN(row.EventDate.getTime())) {
         formattedDate = row.EventDate.toISOString().split("T")[0];
       }
       return {
-        Name: row.Name || row.name || "Unknown",
-        Email: row.Email || row.email || "",
-        EventType: row.EventType || row.Occasion || "Unknown",
-        EventDate: formattedDate || row.EventDate || "",
-        photoUrl: row.PhotoURL || row.photoUrl || null
-      }
+        Name: row.Name || "Unknown",
+        Email: row.Email || "",
+        EventType: row.EventType || "Unknown",
+        EventDate: formattedDate || "",
+        photoUrl: row.PhotoURL || null,
+      };
     });
 
     return res.json(previewData);
-  } catch (error: any) {
-    console.error("PREVIEW FAILED", error.message);
+  } catch (error: unknown) {
+    if (axios.isAxiosError(error) && error.response?.status === 401) {
+      await OneDriveConnection.updateOne(
+        { userId: req.user?.uid },
+        { needsReconnect: true, lastError: "Microsoft session expired during preview" }
+      );
+      return res.status(401).json({
+        success: false,
+        needsReconnect: true,
+        message: "Microsoft session expired. Please reconnect.",
+      });
+    }
+
+    const err = error as { message?: string };
+    logger.error({ err: err?.message || error }, "OneDrive preview failed");
     return res.status(500).json({
       success: false,
-      message: error.message,
+      message: err?.message || "Failed to preview Excel",
     });
   }
 }

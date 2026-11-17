@@ -3,6 +3,8 @@ import axios from "axios";
 import Event from "../../models/Event";
 import OneDriveConnection from "../../models/OneDriveConnection";
 import { parseExcel } from "../excel.service";
+import { decrypt } from "../../utils/encryption";
+import { logger } from "../../utils/logger";
 
 interface SyncResult {
   inserted: number;
@@ -13,10 +15,9 @@ interface SyncResult {
 
 export async function syncOneDriveEvents(
   userId: string,
-  accessToken: string,
+  accessToken?: string,
 ): Promise<SyncResult> {
-  console.log("========================================");
-  console.log("OneDrive Synchronization Started");
+  logger.info({ userId }, "OneDrive Synchronization Started");
 
   const connection = await OneDriveConnection.findOne({
     userId,
@@ -27,39 +28,46 @@ export async function syncOneDriveEvents(
     throw new Error("No OneDrive connection found.");
   }
 
-  console.log("File :", connection.fileName);
+  const tokenToUse = accessToken || (connection.accessToken ? decrypt(connection.accessToken) : "");
+  if (!tokenToUse) {
+    connection.needsReconnect = true;
+    connection.lastError = "No access token available for synchronization";
+    await connection.save();
+    throw new Error("No access token available for OneDrive synchronization");
+  }
+
+  logger.debug({ fileName: connection.fileName }, "Syncing file from OneDrive");
 
   /*
       Download latest excel
   */
 
-  console.log("Fetching Excel metadata from Graph API...");
-  const metadataResponse = await axios.get(
-    `https://graph.microsoft.com/v1.0/me/drive/items/${connection.fileId}`,
-    {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-      },
-    }
-  );
+  try {
+    logger.debug("Fetching Excel metadata from Graph API");
+    const metadataResponse = await axios.get(
+      `https://graph.microsoft.com/v1.0/me/drive/items/${connection.fileId}`,
+      {
+        headers: {
+          Authorization: `Bearer ${tokenToUse}`,
+        },
+      }
+    );
 
   const downloadUrl = metadataResponse.data["@microsoft.graph.downloadUrl"];
   if (!downloadUrl) {
     throw new Error("Could not retrieve download URL for the Excel file from Graph API.");
   }
 
-  console.log("Downloading Excel content...");
+  logger.debug("Downloading Excel content from Graph download URL");
   const response = await axios.get(downloadUrl, {
     responseType: "arraybuffer",
   });
-
-  console.log("Excel Downloaded");
 
   const buffer = Buffer.from(response.data);
 
   const rows = parseExcel(buffer);
 
-  console.log(`${rows.length} rows found`);
+  logger.info({ rowCount: rows.length, fileName: connection.fileName }, "Excel downloaded and parsed for sync");
 
   /*
       Existing Events
@@ -103,7 +111,7 @@ export async function syncOneDriveEvents(
     const key = `${row.Email}_${row.EventType}`;
 
     if (excelKeys.has(key)) {
-      console.log(`Skipping duplicate key in excel rows: ${key}`);
+      logger.debug({ key }, "Skipping duplicate key in excel rows");
       continue;
     }
 
@@ -211,15 +219,10 @@ export async function syncOneDriveEvents(
 
   await connection.save();
 
-  console.log("========================================");
-  console.log("Synchronization Completed");
-
-  console.table({
-    inserted,
-    updated,
-    deleted,
-    unchanged,
-  });
+  logger.info(
+    { inserted, updated, deleted, unchanged },
+    "OneDrive synchronization completed successfully",
+  );
 
   return {
     inserted,
@@ -227,4 +230,12 @@ export async function syncOneDriveEvents(
     deleted,
     unchanged,
   };
+} catch (err: unknown) {
+  if (axios.isAxiosError(err) && err.response?.status === 401) {
+    connection.needsReconnect = true;
+    connection.lastError = "Microsoft Graph access token expired";
+    await connection.save();
+  }
+  throw err;
+}
 }

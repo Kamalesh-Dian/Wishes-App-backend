@@ -1,5 +1,6 @@
 import { transporter } from "./transporter";
 import { buildWishTemplate } from "./emailTemplate";
+import { logger } from "../../utils/logger";
 
 interface MailPayload {
   to: string;
@@ -25,5 +26,5 @@ export async function sendWishMail(data: MailPayload) {
     ),
   });
 
-  console.log("Mail Sent:", data.to);
+  logger.info({ recipient: data.to, occasion: data.occasion }, "Wish email sent successfully");
 }

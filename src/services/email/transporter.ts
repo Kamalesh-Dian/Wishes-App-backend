@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import { logger } from "../../utils/logger";
 
 export const transporter = nodemailer.createTransport({
   host: process.env.MAIL_HOST,
@@ -13,9 +14,8 @@ export const transporter = nodemailer.createTransport({
 export async function verifyTransporter() {
   try {
     await transporter.verify();
-    console.log("✅ Gmail transporter ready");
+    logger.info("Mail transporter ready");
   } catch (error) {
-    console.error("❌ Gmail transporter failed");
-    console.error(error);
+    logger.error({ err: error }, "Mail transporter verification failed");
   }
 }

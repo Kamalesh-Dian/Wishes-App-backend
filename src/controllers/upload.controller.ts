@@ -1,8 +1,9 @@
-import type { Request, Response } from "express";
-
+import type { Response } from "express";
+import type { AuthRequest } from "../middleware/auth";
 import cloudinary from "../config/cloudinary";
+import { logger } from "../utils/logger";
 
-export const uploadImage = async (req: Request, res: Response) => {
+export const uploadImage = async (req: AuthRequest, res: Response) => {
   try {
     const file = req.file;
 
@@ -14,27 +15,22 @@ export const uploadImage = async (req: Request, res: Response) => {
     }
 
     const base64 = Buffer.from(file.buffer).toString("base64");
-
     const dataURI = `data:${file.mimetype};base64,${base64}`;
 
     const result = await cloudinary.uploader.upload(dataURI, {
       folder: "wishes-ai",
     });
 
-    console.log("upload req received");
-    console.log(req.file);
-
     res.json({
       success: true,
       imageUrl: result.secure_url,
     });
   } catch (error) {
-    console.error("UPLOAD ERROR:");
-    console.error(error);
+    logger.error({ err: error }, "Image upload failed");
 
     res.status(500).json({
       success: false,
-      error,
+      message: "Image upload failed",
     });
   }
 };

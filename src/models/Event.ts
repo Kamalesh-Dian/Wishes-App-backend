@@ -16,6 +16,8 @@ export interface IEvent extends Document {
 
   department: string;
 
+  timezone?: string;
+
   customMessage?: string;
 
   status:
@@ -35,6 +37,12 @@ export interface IEvent extends Document {
   generatedWishText?: string;
 
   generatedAt: Date;
+
+  claimedAt?: Date;
+
+  attempts: number;
+
+  lastError?: string;
 
   createdAt: Date;
 }
@@ -83,6 +91,11 @@ const EventSchema = new Schema<IEvent>(
 
     department: String,
 
+    timezone: {
+      type: String,
+      default: () => process.env.DEFAULT_TZ || "Asia/Kolkata",
+    },
+
     customMessage: String,
 
     status: {
@@ -106,6 +119,17 @@ const EventSchema = new Schema<IEvent>(
     },
 
     generatedAt: Date,
+
+    claimedAt: Date,
+
+    attempts: {
+      type: Number,
+      default: 0,
+    },
+
+    lastError: {
+      type: String,
+    },
   },
   {
     timestamps: true,

@@ -1,11 +1,14 @@
 import express from "express";
 import multer from "multer";
+import { auth } from "../middleware/auth";
 
 import { uploadEvents, getEvents, importJsonEvents, saveGeneratedWish, updateEvent, deleteEvent } from "../controllers/event.controller";
 
 const router = express.Router();
 
 const upload = multer();
+
+router.use(auth);
 
 router.post("/import", upload.single("file"), uploadEvents);
 

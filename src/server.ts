@@ -5,31 +5,22 @@ import app from "./app";
 import { connectDB } from "./config/db";
 import { verifyTransporter } from "./services/email/transporter";
 import { startAutomationCron } from "./cron/automation.cron";
+import { logger } from "./utils/logger";
 
 const PORT = process.env.PORT || 5000;
 
 async function startServer() {
   try {
     await connectDB();
-
-    console.log("======================================");
-    console.log("Server Timezone");
-    console.log("Timezone:", Intl.DateTimeFormat().resolvedOptions().timeZone);
-    console.log("Offset:", new Date().getTimezoneOffset());
-    console.log("Current:", new Date());
-    console.log("ISO:", new Date().toISOString());
-    console.log("======================================");
-
     await verifyTransporter();
-
     startAutomationCron();
-    
+
     app.listen(PORT, () => {
-      console.log(`Server running on ${PORT}`);
+      logger.info(`Server running on port ${PORT}`);
     });
   } catch (error) {
-    console.error("Server startup failed");
-    console.error(error);
+    logger.fatal({ err: error }, "Server startup failed");
+    process.exit(1);
   }
 }
 

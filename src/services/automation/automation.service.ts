@@ -5,6 +5,7 @@ import { getCompressedEmployeeImage } from "./employeeImage.service";
 import { buildAutomationPrompt } from "./automationPrompt.service";
 import { generateImage } from "../image.service";
 import { uploadToCloudinary } from "../cloudinary.service";
+import { logger } from "../../utils/logger";
 
 export async function generateEventWish(eventId: string) {
   const event = await Event.findById(eventId);
@@ -17,25 +18,21 @@ export async function generateEventWish(eventId: string) {
     throw new Error(`Photo URL missing for ${event.name}`);
   }
 
-  console.log("Downloading employee image...");
+  logger.debug({ eventId }, "Downloading employee image for automated wish");
 
   const uploadedImage = await getCompressedEmployeeImage(event.photoUrl);
 
-  console.log("Building prompt...");
-
   const prompt = buildAutomationPrompt(event);
 
-  console.log("Generating AI image...");
+  logger.debug({ eventId }, "Generating automated AI image");
 
   const image = await generateImage(prompt, uploadedImage, "flux");
 
-  console.log("Uploading to Cloudinary...");
+  logger.debug({ eventId }, "Uploading generated image to Cloudinary");
 
   const imageUrl = await uploadToCloudinary(
     `data:${image.mimeType};base64,${image.base64}`,
   );
-
-  console.log("Saving wish...");
 
   const wish = await Wish.create({
     user: event.userId,
@@ -57,7 +54,7 @@ export async function generateEventWish(eventId: string) {
 
   await event.save();
 
-  console.log("Wish Generated Successfully");
+  logger.info({ eventId, wishId: wish._id }, "Automated wish generated successfully");
 
   return {
     success: true,
