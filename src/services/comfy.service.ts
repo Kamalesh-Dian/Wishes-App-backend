@@ -2,6 +2,7 @@ import axios from "axios";
 import sharp from "sharp";
 import { logger } from "../utils/logger";
 import { uploadVideoToCloudinary } from "./cloudinary.service";
+import { NEGATIVE_PROMPT } from "./promptBuilder";
 import type { GenerateVideoModelOptions, VideoModelResult } from "./video.service";
 
 interface ComfyUploadResponse {
@@ -110,17 +111,21 @@ export async function uploadImageToComfy(
 }
 
 /**
- * Polls ComfyUI /history/{prompt_id} until execution is complete
+ * Polls ComfyUI /history/{prompt_id} until execution is complete.
+ * Inspects all output node arrays (images, gifs, animated, videos) and returns matching output file.
  */
 async function waitForComfyOutput(
   promptId: string,
-  timeoutMs = 180000
+  timeoutMs = 180000,
+  isVideoWorkflow = false
 ): Promise<{ filename: string; subfolder: string; type: string }> {
   const comfyUrl = getComfyApiUrl();
   if (!comfyUrl) throw new Error("COMFY_API_URL is not set");
 
   const startTime = Date.now();
-  logger.info({ promptId }, "Waiting for ComfyUI execution output...");
+  logger.info({ promptId, isVideoWorkflow }, "Waiting for ComfyUI execution output...");
+
+  const videoExtensions = new Set([".mp4", ".webp", ".gif", ".webm", ".mov", ".avi", ".mkv"]);
 
   while (Date.now() - startTime < timeoutMs) {
     await new Promise((r) => setTimeout(r, 2000));
@@ -132,7 +137,6 @@ async function waitForComfyOutput(
 
       const historyData = res.data?.[promptId];
       if (historyData) {
-        // Fast fail: if ComfyUI errored on any node, immediately throw instead of hanging for 5 mins
         if (historyData.status?.status_str === "error") {
           const errMessage =
             historyData.status?.messages?.find((m) => m[0] === "execution_error")?.[1]
@@ -141,13 +145,37 @@ async function waitForComfyOutput(
         }
 
         if (historyData.outputs) {
+          let firstFallbackFile: { filename: string; subfolder: string; type: string } | null = null;
+
           for (const nodeId of Object.keys(historyData.outputs)) {
-            const out = historyData.outputs[nodeId];
-            const fileInfo = out.images?.[0];
-            if (fileInfo && typeof fileInfo === "object" && fileInfo.filename) {
-              logger.info({ promptId, fileInfo }, "ComfyUI generation completed successfully");
-              return fileInfo;
+            const out = historyData.outputs[nodeId] as Record<string, unknown>;
+            if (!out) continue;
+
+            for (const key of Object.keys(out)) {
+              const val = out[key];
+              if (Array.isArray(val)) {
+                for (const item of val) {
+                  if (item && typeof item === "object" && typeof item.filename === "string") {
+                    const ext = ("." + item.filename.split(".").pop()).toLowerCase();
+                    const isVideoExt = videoExtensions.has(ext);
+
+                    if (isVideoWorkflow) {
+                      if (isVideoExt) {
+                        logger.info({ promptId, key, fileInfo: item }, "ComfyUI video/animated output detected");
+                        return item;
+                      }
+                    } else if (!firstFallbackFile) {
+                      firstFallbackFile = item;
+                    }
+                  }
+                }
+              }
             }
+          }
+
+          if (firstFallbackFile) {
+            logger.info({ promptId, fileInfo: firstFallbackFile }, "ComfyUI output file found");
+            return firstFallbackFile;
           }
         }
       }
@@ -183,6 +211,31 @@ async function downloadComfyFile(
   });
 
   return Buffer.from(res.data);
+}
+
+async function postPromptWithRetry(
+  comfyUrl: string,
+  payload: { prompt: Record<string, unknown>; client_id: string }
+): Promise<ComfyPromptResponse> {
+  try {
+    const res = await axios.post<ComfyPromptResponse>(`${comfyUrl}/prompt`, payload, { timeout: 15000 });
+    return res.data;
+  } catch (err: unknown) {
+    const axiosErr = err as { response?: { status?: number; data?: unknown }; message?: string };
+    const isGpuBusy =
+      axiosErr.response?.status === 503 ||
+      (typeof axiosErr.response?.data === "string" && axiosErr.response.data.includes("gpu_busy")) ||
+      (typeof axiosErr.response?.data === "object" && (axiosErr.response?.data as { error?: string })?.error === "gpu_busy");
+
+    if (isGpuBusy) {
+      const retryDelay = process.env.GPU_RETRY_DELAY_MS ? parseInt(process.env.GPU_RETRY_DELAY_MS, 10) : 20000;
+      logger.warn({ retryDelay }, "ComfyUI returned 503 gpu_busy. Waiting before retrying prompt submission once...");
+      await new Promise((resolve) => setTimeout(resolve, retryDelay));
+      const retryRes = await axios.post<ComfyPromptResponse>(`${comfyUrl}/prompt`, payload, { timeout: 15000 });
+      return retryRes.data;
+    }
+    throw err;
+  }
 }
 
 /**
@@ -243,7 +296,7 @@ export async function generateImageWithComfy(
       class_type: "CLIPTextEncode",
       inputs: {
         clip: ["2", 0],
-        text: "blurry, out of focus, distorted face, plastic skin, low quality artifacts",
+        text: NEGATIVE_PROMPT,
       },
     },
   };
@@ -312,16 +365,12 @@ export async function generateImageWithComfy(
     },
   };
 
-  const queueRes = await axios.post<ComfyPromptResponse>(
-    `${comfyUrl}/prompt`,
-    {
-      prompt: promptGraph,
-      client_id: "wishes_ai_backend",
-    },
-    { timeout: 15000 }
-  );
+  const promptData = await postPromptWithRetry(comfyUrl, {
+    prompt: promptGraph,
+    client_id: "wishes_ai_backend",
+  });
 
-  const promptId = queueRes.data.prompt_id;
+  const promptId = promptData.prompt_id;
   const fileInfo = await waitForComfyOutput(promptId, 180000);
   const fileBuffer = await downloadComfyFile(fileInfo);
 
@@ -345,13 +394,40 @@ export async function generateVideoWithComfy(
 
   logger.info({ effectiveDuration }, "Dispatching video generation to ComfyUI SVD XT 1.1");
 
-  // 1. Upload reference image to ComfyUI input folder
+  // 1. Inspect image dimensions and resize to 1024x576 (landscape) or 576x1024 (portrait)
+  let imageBuffer: Buffer;
+  if (imageUrl.startsWith("data:")) {
+    const matches = imageUrl.match(/^data:(.+?);base64,(.+)$/);
+    if (!matches) throw new Error("Invalid base64 image data");
+    imageBuffer = Buffer.from(matches[2], "base64");
+  } else if (imageUrl.startsWith("http://") || imageUrl.startsWith("https://")) {
+    const res = await axios.get(imageUrl, { responseType: "arraybuffer", timeout: 20000 });
+    imageBuffer = Buffer.from(res.data);
+  } else {
+    imageBuffer = Buffer.from(imageUrl, "base64");
+  }
+
+  const meta = await sharp(imageBuffer).metadata();
+  const isPortrait = (meta.height || 0) >= (meta.width || 0);
+  const targetWidth = isPortrait ? 576 : 1024;
+  const targetHeight = isPortrait ? 1024 : 576;
+
+  const resizedBuffer = await sharp(imageBuffer)
+    .resize(targetWidth, targetHeight, { fit: "cover" })
+    .png()
+    .toBuffer();
+
   const uploadedFileName = await uploadImageToComfy(
-    imageUrl,
+    resizedBuffer,
     `svd_init_${Date.now()}.png`
   );
 
-  // 2. Build SVD XT Workflow Graph
+  const envMotionBucket = parseInt(process.env.SVD_MOTION_BUCKET || "80", 10);
+  const motionBucketId = isNaN(envMotionBucket)
+    ? 80
+    : Math.min(100, Math.max(60, envMotionBucket));
+
+  // 2. Build SVD XT Workflow Graph (no text prompts; motion controlled via motion_bucket_id)
   const promptGraph = {
     "1": {
       class_type: "ImageOnlyCheckpointLoader",
@@ -371,10 +447,10 @@ export async function generateVideoWithComfy(
         clip_vision: ["1", 1],
         init_image: ["2", 0],
         vae: ["1", 2],
-        width: 512,
-        height: 512,
+        width: targetWidth,
+        height: targetHeight,
         video_frames: 25,
-        motion_bucket_id: 127,
+        motion_bucket_id: motionBucketId,
         fps: 6,
         augmentation_level: 0.0,
       },
@@ -386,7 +462,7 @@ export async function generateVideoWithComfy(
         positive: ["3", 0],
         negative: ["3", 1],
         latent_image: ["3", 2],
-        seed: Math.floor(Math.random() * 10000000),
+        seed: 42,
         steps: 20,
         cfg: 2.5,
         sampler_name: "euler",
@@ -415,17 +491,13 @@ export async function generateVideoWithComfy(
   };
 
   // 3. Queue prompt
-  const queueRes = await axios.post<ComfyPromptResponse>(
-    `${comfyUrl}/prompt`,
-    {
-      prompt: promptGraph,
-      client_id: "wishes_ai_backend",
-    },
-    { timeout: 15000 }
-  );
+  const promptData = await postPromptWithRetry(comfyUrl, {
+    prompt: promptGraph,
+    client_id: "wishes_ai_backend",
+  });
 
-  const promptId = queueRes.data.prompt_id;
-  const fileInfo = await waitForComfyOutput(promptId, 300000);
+  const promptId = promptData.prompt_id;
+  const fileInfo = await waitForComfyOutput(promptId, 300000, true);
   const fileBuffer = await downloadComfyFile(fileInfo);
 
   // 4. Upload generated video/animation directly to Cloudinary CDN
@@ -437,5 +509,6 @@ export async function generateVideoWithComfy(
     duration: effectiveDuration,
     mimeType: "video/mp4",
     model: "Stable Video Diffusion XT 1.1 (ComfyUI)",
+    tier: "ai-video",
   };
 }

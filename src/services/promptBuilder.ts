@@ -1,15 +1,28 @@
-import { themeMap } from "../constants/themeMap";
-import { decorationMap } from "../constants/decorationsMap";
+import { getThemeDescription } from "../constants/themeMap";
+import { getDecorationDescription } from "../constants/decorationsMap";
+import { getOccasionDetail } from "../constants/occasionMap";
 
-export function buildFluxPrompt(data: {
+export const NEGATIVE_PROMPT =
+  "extra fingers, distorted face, different person, older face, plastic skin, blurry, text, watermark";
+
+export interface BuildPromptOptions {
   occasion: string;
-  theme: string;
+  theme?: string;
   decorations?: string[] | string;
   people?: string[] | string;
   customMessage?: string;
   additionalInformation?: string;
-}) {
-  const themeDescription = themeMap[data.theme] || data.theme;
+}
+
+export function buildFluxPrompt(data: BuildPromptOptions): string {
+  const occasionClean = data.occasion?.trim() || "celebration";
+  const occasionDetail = getOccasionDetail(data.occasion);
+  const occasionOutfit = occasionDetail.outfit?.trim();
+
+  let themeDescription = getThemeDescription(data.theme);
+  if (!themeDescription && occasionDetail.scene) {
+    themeDescription = occasionDetail.scene;
+  }
 
   const rawDecorations = Array.isArray(data.decorations)
     ? data.decorations
@@ -17,35 +30,40 @@ export function buildFluxPrompt(data: {
       ? [data.decorations]
       : [];
 
-  const decorationDescriptions = rawDecorations
-    .map((d: string) => decorationMap[d] || d)
-    .filter(Boolean)
+  const decorations = rawDecorations
+    .map((d) => (typeof d === "string" ? getDecorationDescription(d) : ""))
+    .filter((d) => Boolean(d && d.trim().length > 0))
     .join(", ");
 
-  const peopleList = Array.isArray(data.people)
-    ? data.people.filter(Boolean).join(", ")
-    : (data.people || "").trim();
-
-  const customMessage = data.customMessage?.trim();
   const additionalInfo = data.additionalInformation?.trim();
 
-  const lines = [
-    "same person from reference image",
-    "preserve identity",
-    "preserve face and don't make them old aged face",
-    "but you can change the dress that suit the occasion that provided",
-    data.occasion,
-    themeDescription,
-    decorationDescriptions,
-    peopleList,
-    customMessage ? `add this text: ${customMessage}` : "",
-    additionalInfo || "",
-    "greeting card",
-    "photorealistic",
-    "professional",
-    "high detail",
-    "cinematic lighting",
-  ].filter((line) => Boolean(line && line.trim().length > 0));
+  const lines: string[] = [
+    `Edit the provided photo into a ${occasionClean} celebration image.`,
+    "Keep the same person: identical face, facial structure, skin tone, hair, age and expression style. Do not alter or idealize the face.",
+    "Change only the clothing, background and surroundings.",
+  ];
 
-  return lines.join(",\n");
+  if (occasionOutfit) {
+    lines.push(`Outfit: ${occasionOutfit}.`);
+  }
+
+  if (themeDescription) {
+    lines.push(`Setting: ${themeDescription}.`);
+  }
+
+  if (decorations) {
+    lines.push(`Include: ${decorations}.`);
+  }
+
+  lines.push(
+    "Lighting and style: warm cinematic lighting, natural skin texture, realistic photography, shallow depth of field.",
+    "Composition: subject centered in the lower two-thirds, with clear empty space at the top for a caption.",
+    "Do not add any text, letters, logos or watermarks."
+  );
+
+  if (additionalInfo) {
+    lines.push(additionalInfo);
+  }
+
+  return lines.join("\n");
 }

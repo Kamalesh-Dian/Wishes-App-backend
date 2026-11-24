@@ -1,7 +1,7 @@
 import dotenv from "dotenv";
 import axios from "axios";
 import { uploadToCloudinary, uploadVideoToCloudinary, generateDynamicMotionVideoUrl } from "./cloudinary.service";
-import { buildFluxPrompt } from "./promptBuilder";
+import { buildVideoPrompt } from "./videoPromptBuilder";
 import { generateVideoWithComfy, getComfyApiUrl } from "./comfy.service";
 import { logger } from "../utils/logger";
 
@@ -26,6 +26,7 @@ export interface VideoModelResult {
   duration: number;
   mimeType: string;
   model: string;
+  tier: "ai-video" | "animated-card";
 }
 
 async function getImageBase64(imageInput: string): Promise<{ base64: string; mimeType: string }> {
@@ -69,29 +70,21 @@ export async function generateVideoWithGeminiOmni(
 
   const effectiveDuration = Math.min(8, Math.max(4, Math.round(duration)));
 
-  // Build comprehensive prompt matching image generation context and facial likeness
-  const scenePrompt =
-    customPrompt.trim() ||
-    buildFluxPrompt({
-      occasion,
-      theme,
-      decorations,
-      people,
-      customMessage,
-      additionalInformation,
-    });
-
-  const prompt = `Generate a ${effectiveDuration}-second photorealistic cinematic celebration video animating this image. Maintain the exact same person, face, identity, and facial likeness from the reference image. Visual scene details: ${scenePrompt}. Motion style: ${motionStyle}. Camera dynamics: smooth natural motion, festive particle drifts, cinematic lighting and celebration ambiance.`;
+  const prompt = buildVideoPrompt({
+    duration: effectiveDuration,
+    motionStyle,
+    occasion,
+  });
 
   logger.info(
     { model: "gemini-omni-1.2-flash", occasion, duration: effectiveDuration, promptLength: prompt.length },
-    "Dispatching image-to-video generation to gemini-omni-1.2-flash with full scene prompt"
+    "Dispatching image-to-video generation to gemini-omni-1.2-flash with motion prompt"
   );
 
   const { base64, mimeType } = await getImageBase64(imageUrl);
 
   const response = await axios.post(
-    `https://generativelanguage.googleapis.com/v1beta/interactions?key=${apiKey}`,
+    `https://generativelanguage.googleapis.com/v1beta/interactions`,
     {
       model: "gemini-omni-1.2-flash",
       input: [
@@ -107,7 +100,10 @@ export async function generateVideoWithGeminiOmni(
       ],
     },
     {
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": apiKey,
+      },
       timeout: 180000, // 3 minutes timeout for video synthesis
     }
   );
@@ -152,6 +148,7 @@ export async function generateVideoWithGeminiOmni(
     duration: effectiveDuration,
     mimeType: videoMime,
     model: "Google gemini-omni-1.2-flash",
+    tier: "ai-video",
   };
 }
 
@@ -227,27 +224,63 @@ export async function generateVideoWithModel(
     try {
       logger.info({ url: fluxApiUrl, duration: effectiveDuration }, "Dispatching video generation to GPU Model Server");
 
-      const prompt = `Cinematic ${occasion} celebration, ${theme ? `theme: ${theme}, ` : ""}${customMessage ? `message: ${customMessage}, ` : ""}festive lighting, smooth 3D camera pan, particles floating in air`;
+      const prompt = buildVideoPrompt({
+        duration: effectiveDuration,
+        motionStyle,
+        occasion,
+      });
 
-      const res = await axios.post<string | { video?: string; image?: string; mime_type?: string; error?: string }>(
-        `${fluxApiUrl}/generate-video`,
-        {
-          image: imageUrl,
-          prompt,
-          duration_sec: effectiveDuration,
-          fps: 25,
-          style: motionStyle,
-        },
-        {
-          headers: { "Content-Type": "application/json" },
-          timeout: 300000,
-          responseType: "text",
+      const executeVideoColabRequest = async () => {
+        return axios.post<string | { video?: string; image?: string; mime_type?: string; error?: string; model?: string }>(
+          `${fluxApiUrl}/generate-video`,
+          {
+            image: imageUrl,
+            prompt,
+            duration_sec: effectiveDuration,
+            fps: 25,
+            style: motionStyle,
+          },
+          {
+            headers: { "Content-Type": "application/json" },
+            timeout: 300000,
+            responseType: "text",
+          }
+        );
+      };
+
+      let res;
+      try {
+        res = await executeVideoColabRequest();
+      } catch (err: unknown) {
+        const axiosErr = err as { response?: { status?: number; data?: unknown }; message?: string };
+        const isGpuBusy =
+          axiosErr.response?.status === 503 ||
+          (typeof axiosErr.response?.data === "string" && axiosErr.response.data.includes("gpu_busy")) ||
+          (typeof axiosErr.response?.data === "object" && (axiosErr.response?.data as { error?: string })?.error === "gpu_busy") ||
+          (axiosErr.message && axiosErr.message.includes("gpu_busy"));
+
+        if (isGpuBusy) {
+          const retryDelay = process.env.GPU_RETRY_DELAY_MS ? parseInt(process.env.GPU_RETRY_DELAY_MS, 10) : 20000;
+          logger.warn({ retryDelay }, "Colab SVD GPU returned 503 gpu_busy. Waiting before retrying once...");
+          await new Promise((resolve) => setTimeout(resolve, retryDelay));
+          res = await executeVideoColabRequest();
+        } else {
+          throw err;
         }
-      );
+      }
 
-      const rawData = res.data;
-      const parsed: { video?: string; image?: string; mime_type?: string; error?: string; model?: string } =
+      let rawData = res.data;
+      let parsed: { video?: string; image?: string; mime_type?: string; error?: string; model?: string } =
         typeof rawData === "string" ? JSON.parse(rawData.trim()) : rawData;
+
+      if (parsed.error === "gpu_busy") {
+        const retryDelay = process.env.GPU_RETRY_DELAY_MS ? parseInt(process.env.GPU_RETRY_DELAY_MS, 10) : 20000;
+        logger.warn({ retryDelay }, "Colab SVD GPU reported gpu_busy in payload. Waiting before retrying once...");
+        await new Promise((resolve) => setTimeout(resolve, retryDelay));
+        res = await executeVideoColabRequest();
+        rawData = res.data;
+        parsed = typeof rawData === "string" ? JSON.parse(rawData.trim()) : rawData;
+      }
 
       if (parsed.error) {
         throw new Error(parsed.error);
@@ -267,6 +300,7 @@ export async function generateVideoWithModel(
           duration: effectiveDuration,
           mimeType: "video/mp4",
           model: parsed.model || "Stable Video Diffusion (Colab L4 GPU)",
+          tier: "ai-video",
         };
       }
     } catch (apiErr: unknown) {
@@ -297,5 +331,6 @@ export async function generateVideoWithModel(
     duration: effectiveDuration,
     mimeType: "video/mp4",
     model: "Neural Dynamic Motion Engine (Cloudinary)",
+    tier: "animated-card",
   };
 }

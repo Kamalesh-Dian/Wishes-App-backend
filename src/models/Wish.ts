@@ -18,7 +18,39 @@ const WishSchema = new mongoose.Schema(
 
     generatedImage: {
       type: String,
-      required: true,
+      default: "",
+    },
+
+    cleanImage: {
+      type: String,
+    },
+
+    videoUrl: {
+      type: String,
+    },
+
+    status: {
+      type: String,
+      enum: ["queued", "image", "video", "done", "failed"],
+      default: "queued",
+    },
+
+    videoTier: {
+      type: String,
+      enum: ["ai-video", "animated-card"],
+    },
+
+    identityScore: {
+      type: Number,
+    },
+
+    needsReview: {
+      type: Boolean,
+      default: false,
+    },
+
+    error: {
+      type: String,
     },
 
     people: [

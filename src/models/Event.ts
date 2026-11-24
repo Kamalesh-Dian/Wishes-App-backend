@@ -39,6 +39,12 @@ export interface IEvent extends Document {
 
   photoUrl: string;
 
+  cleanImage?: string;
+
+  identityScore?: number;
+
+  needsReview?: boolean;
+
   generatedWishImage: string;
 
   generatedWishVideo?: string;
@@ -90,6 +96,19 @@ const EventSchema = new Schema<IEvent>(
     photoUrl: {
       type: String,
       default: "",
+    },
+
+    cleanImage: {
+      type: String,
+    },
+
+    identityScore: {
+      type: Number,
+    },
+
+    needsReview: {
+      type: Boolean,
+      default: false,
     },
 
     eventDate: {

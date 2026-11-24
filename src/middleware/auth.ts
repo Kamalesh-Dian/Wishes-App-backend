@@ -36,6 +36,11 @@ export const auth = async (
       );
 
     if (token.startsWith("demo_token_")) {
+      if (process.env.ENABLE_DEMO_ACCOUNTS !== "true") {
+        return res.status(401).json({
+          message: "Demo accounts are disabled",
+        });
+      }
       const tier = token.replace("demo_token_", "").toLowerCase();
       const validTier = tier === "pro" ? "pro" : tier === "ultimate" || tier === "enterprise" ? "ultimate" : "free";
       req.user = {

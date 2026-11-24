@@ -10,6 +10,7 @@ import app from "./app";
 import { connectDB } from "./config/db";
 import { verifyTransporter } from "./services/email/transporter";
 import { startAutomationCron } from "./cron/automation.cron";
+import { recoverStuckWishes } from "./services/jobQueue.service";
 import { logger } from "./utils/logger";
 
 const PORT = process.env.PORT || 5000;
@@ -19,6 +20,7 @@ async function startServer() {
     await connectDB();
     await verifyTransporter();
     startAutomationCron();
+    await recoverStuckWishes();
 
     app.listen(PORT, () => {
       logger.info(`Server running on port ${PORT}`);

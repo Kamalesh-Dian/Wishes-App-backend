@@ -20,6 +20,12 @@ const UserSchema = new mongoose.Schema(
     photoURL: {
       type: String,
     },
+
+    plan: {
+      type: String,
+      enum: ["free", "pro", "ultimate"],
+      default: "free",
+    },
   },
   {
     timestamps: true,

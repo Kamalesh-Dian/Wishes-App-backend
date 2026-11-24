@@ -1,11 +1,12 @@
 import type { AuthRequest } from "../middleware/auth";
 import type { Response } from "express";
 import { z } from "zod";
-import { buildFluxPrompt } from "../services/promptBuilder";
-import { generateImage } from "../services/image.service";
-import { uploadToCloudinary } from "../services/cloudinary.service";
+import { wishJobQueue, processWishJob } from "../services/jobQueue.service";
 import { generateVideoWithModel } from "../services/video.service";
 import Wish from "../models/Wish";
+import User from "../models/User";
+import { PLAN_LIMITS, type PlanTier } from "../config/plans";
+import { getUserMonthlyUsage } from "../services/usage.service";
 import { logger } from "../utils/logger";
 
 const generateWishSchema = z.object({
@@ -13,7 +14,8 @@ const generateWishSchema = z.object({
   theme: z.string().trim().min(1, "Theme is required"),
   people: z.array(z.string()).default([]),
   decorations: z.array(z.string()).default([]),
-  aiEngine: z.string().default("gemini"),
+  aiEngine: z.enum(["gemini", "flux", "svd", "comfy", "gemini-omni"]).default("gemini"),
+  videoModel: z.string().optional(),
   uploadedImage: z
     .string()
     .refine(
@@ -58,24 +60,55 @@ export async function generateWish(req: AuthRequest, res: Response) {
 
     const data = validation.data;
 
-    // 2. Plan-based tier generation cap
-    const userEmail = (req.user?.email || "").toLowerCase();
-    let maxImages = 5; // Default free plan: 5 images
-    let planName = "Free Plan";
-    if (userEmail.includes("ultimate") || userEmail.includes("enterprise") || userEmail.includes("12")) {
-      maxImages = 75; // 75 images + 25 videos = 100 total
-      planName = "Ultimate Plan ($12)";
-    } else if (userEmail.includes("pro") || userEmail.includes("5")) {
-      maxImages = 40; // 40 images + 10 videos = 50 total
-      planName = "Pro Plan ($5)";
+    // 2. Plan lookup & monthly usage enforcement
+    let userDoc = await User.findOne({ uid: userId });
+    if (!userDoc) {
+      let defaultPlan: PlanTier = "free";
+      if (process.env.ENABLE_DEMO_ACCOUNTS === "true" && req.user?.email) {
+        const demoEmail = req.user.email.toLowerCase();
+        if (demoEmail.includes("ultimate")) defaultPlan = "ultimate";
+        else if (demoEmail.includes("pro")) defaultPlan = "pro";
+      }
+      userDoc = await User.create({
+        uid: userId,
+        email: req.user?.email || `${userId}@wishes.ai`,
+        plan: defaultPlan,
+      });
     }
 
-    const totalWishesCount = await Wish.countDocuments({ user: userId });
-    if (totalWishesCount >= maxImages) {
+    let userPlan = (userDoc.plan as PlanTier) || "free";
+    if (process.env.ENABLE_DEMO_ACCOUNTS === "true" && req.user?.email) {
+      const demoEmail = req.user.email.toLowerCase();
+      if (demoEmail.includes("ultimate")) userPlan = "ultimate";
+      else if (demoEmail.includes("pro")) userPlan = "pro";
+    }
+
+    const limits = PLAN_LIMITS[userPlan] || PLAN_LIMITS.free;
+    const usage = await getUserMonthlyUsage(userId);
+
+    if (usage.images >= limits.images) {
       return res.status(403).json({
         success: false,
-        error: `Image generation limit reached for ${planName} (${totalWishesCount}/${maxImages} images used). Upgrade your plan to continue generating.`,
+        error: `Image generation limit reached for ${userPlan.toUpperCase()} plan (${usage.images}/${limits.images} images used). Upgrade your plan to continue generating.`,
       });
+    }
+
+    const effectiveVideoModel = data.videoModel || (data.aiEngine === "svd" ? "svd" : data.aiEngine === "gemini-omni" ? "gemini-omni" : undefined);
+    const isVideoRequest = Boolean(data.animationEnabled || effectiveVideoModel);
+
+    if (isVideoRequest) {
+      if (limits.videos === 0) {
+        return res.status(403).json({
+          success: false,
+          error: "Video generation is not available on the Free plan. Upgrade to Pro or Ultimate to generate celebration videos.",
+        });
+      }
+      if (usage.videos >= limits.videos) {
+        return res.status(403).json({
+          success: false,
+          error: `Video generation limit reached for ${userPlan.toUpperCase()} plan (${usage.videos}/${limits.videos} videos used). Upgrade your plan to continue generating videos.`,
+        });
+      }
     }
 
     // Daily per-user generation cap fallback
@@ -95,74 +128,66 @@ export async function generateWish(req: AuthRequest, res: Response) {
       });
     }
 
-    // 3. Build AI generation prompt
-    const prompt = buildFluxPrompt(data);
+    // 3. Create initial queued Wish record
 
-    // 4. Generate AI image
-    const imageProvider =
-      data.aiEngine === "flux" || data.aiEngine === "svd" ? "flux" : "gemini";
-    const image = await generateImage(prompt, data.uploadedImage, imageProvider);
-
-    // 5. Upload result to Cloudinary
-    const imageUrl = await uploadToCloudinary(
-      `data:${image.mimeType};base64,${image.base64}`
-    );
-
-    // 5.5 If video creation is enabled, synthesize video alongside image
-    let videoUrl: string | undefined = undefined;
-    if (data.animationEnabled) {
-      try {
-        logger.info(
-          { model: data.aiEngine },
-          "Synthesizing celebration video alongside image"
-        );
-        const videoRes = await generateVideoWithModel({
-          imageUrl,
-          occasion: data.occasion,
-          theme: data.theme,
-          customMessage: data.customMessage,
-          people: data.people,
-          decorations: data.decorations,
-          additionalInformation: data.additionalInformation,
-          duration: data.aiEngine === "svd" ? 4 : 8,
-          aiEngine: data.aiEngine === "svd" ? "svd" : "gemini",
-        });
-        videoUrl = videoRes.videoUrl;
-        logger.info({ videoUrl, model: videoRes.model }, "Celebration video synthesized successfully");
-      } catch (vidErr) {
-        logger.warn({ err: vidErr }, "Auto-video synthesis failed; falling back to image-only");
-      }
-    }
-
-    // 6. Persist Wish record
     const wish = await Wish.create({
       user: userId,
       occasion: data.occasion,
       theme: data.theme,
-      generatedImage: imageUrl,
       people: data.people,
       decorations: data.decorations,
       customMessage: data.customMessage,
-      animationEnabled: data.animationEnabled,
-      aiProvider: data.aiEngine,
-      prompt,
+      animationEnabled: isVideoRequest,
+      aiProvider: isVideoRequest ? (effectiveVideoModel || "gemini-omni") : data.aiEngine,
+      status: "queued",
     });
+
+    // 4. Dispatch background job into in-process concurrency queue
+    wishJobQueue.push(() => processWishJob(wish._id.toString(), data, userId));
 
     return res.json({
       success: true,
-      imageURL: imageUrl,
-      videoURL: videoUrl,
-      mimeType: image.mimeType,
       wishId: wish._id,
+      status: "queued",
     });
   } catch (error) {
-    // Sanitize error logging and client response to avoid leaking upstream API details
-    logger.error({ err: error instanceof Error ? error.message : error }, "Wish generation failed");
+    logger.error({ err: error instanceof Error ? error.message : error }, "Wish creation failed");
 
     return res.status(500).json({
       success: false,
-      error: "An error occurred while generating your wish. Please try again later.",
+      error: "An error occurred while queuing your wish. Please try again later.",
     });
+  }
+}
+
+/**
+ * Polling endpoint to check async generation status of a wish
+ */
+export async function getWishStatus(req: AuthRequest, res: Response) {
+  try {
+    const userId = req.user?.uid;
+    const { wishId } = req.params;
+
+    if (!userId) {
+      return res.status(401).json({ success: false, error: "Unauthorized" });
+    }
+
+    const wish = await Wish.findOne({ _id: wishId, user: userId });
+    if (!wish) {
+      return res.status(404).json({ success: false, error: "Wish not found" });
+    }
+
+    return res.json({
+      success: true,
+      status: wish.status || "queued",
+      imageUrl: wish.generatedImage || "",
+      cleanImageUrl: wish.cleanImage || "",
+      videoUrl: wish.videoUrl || "",
+      error: wish.error,
+    });
+  } catch (error) {
+    logger.error({ err: error }, "Failed to fetch wish status");
+    return res.status(500).json({ success: false, error: "Failed to fetch wish status" });
   }
 }
 

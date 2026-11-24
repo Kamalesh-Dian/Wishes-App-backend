@@ -163,6 +163,18 @@ export async function generateTodayEvents(): Promise<number> {
         const result = await generateEventWish(event._id.toString());
         logger.debug({ eventId: event._id }, "Image generated successfully for event");
 
+        if (result.event.needsReview) {
+          logger.warn(
+            { eventId: event._id, identityScore: result.event.identityScore },
+            "Event marked as needsReview due to low facial likeness; skipping automated email/WhatsApp delivery pending review"
+          );
+          await Event.findByIdAndUpdate(event._id, {
+            status: "generated",
+            lastError: "Facial similarity below threshold (needsReview)",
+          });
+          continue;
+        }
+
         // Mark as sending
         await Event.findByIdAndUpdate(event._id, { status: "sending" });
 

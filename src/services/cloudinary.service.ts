@@ -4,9 +4,37 @@ import os from "os";
 import cloudinary from "../config/cloudinary";
 import { logger } from "../utils/logger";
 
-export async function uploadToCloudinary(imageBase64: string): Promise<string> {
-  const result = await cloudinary.uploader.upload(imageBase64, {
+export async function uploadToCloudinary(imageInput: string): Promise<string> {
+  const isBase64 = imageInput.startsWith("data:") || !imageInput.startsWith("http");
+
+  if (isBase64) {
+    const base64Data = imageInput.includes(",") ? imageInput.split(",")[1] : imageInput;
+    const buffer = Buffer.from(base64Data, "base64");
+    const tempFile = path.join(
+      os.tmpdir(),
+      `wishes_img_${Date.now()}_${Math.random().toString(36).substring(7)}.png`
+    );
+
+    try {
+      await fs.promises.writeFile(tempFile, buffer);
+      logger.info({ sizeBytes: buffer.length }, "Uploading image file to Cloudinary");
+
+      const result = await cloudinary.uploader.upload(tempFile, {
+        folder: "wishes-ai",
+        resource_type: "image",
+        timeout: 180000, // 3 minutes timeout
+      });
+
+      return result.secure_url;
+    } finally {
+      await fs.promises.unlink(tempFile).catch(() => {});
+    }
+  }
+
+  const result = await cloudinary.uploader.upload(imageInput, {
     folder: "wishes-ai",
+    resource_type: "image",
+    timeout: 180000,
   });
 
   return result.secure_url;
@@ -30,6 +58,7 @@ export async function uploadVideoToCloudinary(videoInput: string): Promise<strin
       const result = await cloudinary.uploader.upload(tempFile, {
         folder: "wishes-ai/videos",
         resource_type: "video",
+        timeout: 180000,
       });
 
       return result.secure_url;
@@ -42,6 +71,7 @@ export async function uploadVideoToCloudinary(videoInput: string): Promise<strin
   const result = await cloudinary.uploader.upload(videoInput, {
     folder: "wishes-ai/videos",
     resource_type: "video",
+    timeout: 180000,
   });
 
   return result.secure_url;

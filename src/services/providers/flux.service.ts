@@ -11,6 +11,7 @@ dotenv.config();
 export interface FluxResult {
   base64: string;
   mimeType: string;
+  provider: string;
 }
 
 export async function generateWithFlux(
@@ -24,7 +25,10 @@ export async function generateWithFlux(
       logger.info({ url: comfyUrl }, "Routing image generation request to ComfyUI endpoint");
       const comfyResult = await generateImageWithComfy(prompt, uploadedImage);
       logger.info("Successfully received generated image from ComfyUI");
-      return comfyResult;
+      return {
+        ...comfyResult,
+        provider: "flux-comfy",
+      };
     } catch (comfyErr: unknown) {
       const err = comfyErr as Error;
       logger.warn(
@@ -40,22 +44,55 @@ export async function generateWithFlux(
   if (fluxApiUrl) {
     try {
       logger.info({ url: fluxApiUrl }, "Routing FLUX request to custom FLUX endpoint");
-      const res = await axios.post<string | { image?: string; mime_type?: string; error?: string }>(
-        `${fluxApiUrl}/generate`,
-        {
-          prompt,
-          image: uploadedImage,
-        },
-        {
-          headers: { "Content-Type": "application/json" },
-          timeout: 300000, // 5 minutes to support chunked keep-alive stream from Colab GPU
-          responseType: "text",
-        },
-      );
 
-      const rawData = res.data;
-      const parsed: { image?: string; mime_type?: string; error?: string } =
+      const executeColabRequest = async () => {
+        return axios.post<string | { image?: string; mime_type?: string; error?: string }>(
+          `${fluxApiUrl}/generate`,
+          {
+            prompt,
+            image: uploadedImage,
+          },
+          {
+            headers: { "Content-Type": "application/json" },
+            timeout: 300000, // 5 minutes to support chunked keep-alive stream from Colab GPU
+            responseType: "text",
+          },
+        );
+      };
+
+      let res;
+      try {
+        res = await executeColabRequest();
+      } catch (err: unknown) {
+        const axiosErr = err as { response?: { status?: number; data?: unknown }; message?: string };
+        const isGpuBusy =
+          axiosErr.response?.status === 503 ||
+          (typeof axiosErr.response?.data === "string" && axiosErr.response.data.includes("gpu_busy")) ||
+          (typeof axiosErr.response?.data === "object" && (axiosErr.response?.data as { error?: string })?.error === "gpu_busy") ||
+          (axiosErr.message && axiosErr.message.includes("gpu_busy"));
+
+        if (isGpuBusy) {
+          const retryDelay = process.env.GPU_RETRY_DELAY_MS ? parseInt(process.env.GPU_RETRY_DELAY_MS, 10) : 20000;
+          logger.warn({ retryDelay }, "Colab FLUX GPU returned 503 gpu_busy. Waiting before retrying once...");
+          await new Promise((resolve) => setTimeout(resolve, retryDelay));
+          res = await executeColabRequest();
+        } else {
+          throw err;
+        }
+      }
+
+      let rawData = res.data;
+      let parsed: { image?: string; mime_type?: string; error?: string } =
         typeof rawData === "string" ? JSON.parse(rawData.trim()) : rawData;
+
+      if (parsed.error === "gpu_busy") {
+        const retryDelay = process.env.GPU_RETRY_DELAY_MS ? parseInt(process.env.GPU_RETRY_DELAY_MS, 10) : 20000;
+        logger.warn({ retryDelay }, "Colab FLUX GPU reported gpu_busy in payload. Waiting before retrying once...");
+        await new Promise((resolve) => setTimeout(resolve, retryDelay));
+        res = await executeColabRequest();
+        rawData = res.data;
+        parsed = typeof rawData === "string" ? JSON.parse(rawData.trim()) : rawData;
+      }
 
       if (parsed.error) {
         throw new Error(parsed.error);
@@ -66,6 +103,7 @@ export async function generateWithFlux(
         return {
           base64: parsed.image,
           mimeType: parsed.mime_type || "image/png",
+          provider: "flux-colab",
         };
       }
     } catch (apiErr: unknown) {
@@ -85,7 +123,7 @@ export async function generateWithFlux(
     }
   }
 
-  // 2. Hugging Face Inference Client (black-forest-labs/FLUX.1-Kontext-dev)
+  // 3. Hugging Face Inference Client (black-forest-labs/FLUX.1-Kontext-dev)
   const hfToken = process.env.HF_TOKEN?.trim();
   const fluxModel = process.env.FLUX_MODEL?.trim() || "black-forest-labs/FLUX.1-Kontext-dev";
 
@@ -131,16 +169,17 @@ export async function generateWithFlux(
       return {
         base64: outputBuffer.toString("base64"),
         mimeType: "image/png",
+        provider: "flux-huggingface",
       };
     } catch (hfErr: unknown) {
       const errMsg = hfErr instanceof Error ? hfErr.message : String(hfErr);
       logger.warn(
         { err: errMsg, model: fluxModel },
-        "Hugging Face FLUX Inference Provider failed (credits/quota or permission); falling back to Gemini engine",
+        "Hugging Face FLUX Inference Provider failed; falling back to Gemini in image service",
       );
       throw hfErr;
     }
   }
 
-  throw new Error("No FLUX endpoint, HF_TOKEN, or fallback provider configured");
+  throw new Error("No FLUX endpoint or HF_TOKEN available");
 }

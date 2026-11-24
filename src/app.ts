@@ -10,6 +10,7 @@ import historyRoutes from "./routes/history.routes";
 import eventRoutes from "./routes/event.routes";
 import onedriveRoutes from "./routes/onedrive.routes";
 import automationRoutes from "./routes/automation.routes";
+import userRoutes from "./routes/user.routes";
 
 const app = express();
 
@@ -82,6 +83,7 @@ app.use("/api/history", historyRoutes);
 app.use("/api/events", eventRoutes);
 app.use("/api/onedrive", onedriveRoutes);
 app.use("/api/automation", automationRoutes);
+app.use("/api", userRoutes);
 
 app.use(
   "/uploads",
