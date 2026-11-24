@@ -7,11 +7,15 @@ export const MAX_EXCEL_ROWS = 1000;
 export interface ParsedExcelEvent {
   Name: string;
   Email: string;
+  Phone?: string;
   PhotoURL: string;
   EventType: string;
   EventDate: Date | null;
   Department: string;
   CustomMessage: string;
+  MediaType?: "image" | "video" | "both";
+  DeliveryChannel?: "email" | "whatsapp" | "both";
+  VideoModel?: "gemini-omni" | "svd";
 }
 
 export const parseExcel = (fileBuffer: Buffer): ParsedExcelEvent[] => {
@@ -51,11 +55,31 @@ export const parseExcel = (fileBuffer: Buffer): ParsedExcelEvent[] => {
     // Standardize key names (case-insensitive or common variations)
     const Name = String(row.Name || row.name || "");
     const Email = String(row.Email || row.email || "");
+    const Phone = String(row.Phone || row.phone || row.Mobile || row.mobile || row.WhatsApp || row.whatsapp || row.Contact || "");
     const PhotoURL = String(row.PhotoURL || row.photoUrl || row.PhotoUrl || "");
     const EventType = String(row.EventType || row.eventType || row.Occasion || row.occasion || "");
     const EventDateVal = row.EventDate ?? row.eventDate ?? row.Eventdate ?? row.Date ?? row.date ?? "";
     const Department = String(row.Department || row.department || "");
     const CustomMessage = String(row.CustomMessage || row.customMessage || "");
+
+    const rawMediaType = String(row.MediaType || row.mediaType || row.Media || row.media || "").toLowerCase().trim();
+    let mediaType: "image" | "video" | "both" = "image";
+    if (rawMediaType.includes("both")) {
+      mediaType = "both";
+    } else if (rawMediaType.includes("vid") || rawMediaType.includes("motion")) {
+      mediaType = "video";
+    }
+
+    const rawDelivery = String(row.DeliveryChannel || row.deliveryChannel || row.Delivery || row.delivery || row.Channel || row.channel || "").toLowerCase().trim();
+    let deliveryChannel: "email" | "whatsapp" | "both" = "email";
+    if (rawDelivery.includes("both") || (rawDelivery.includes("email") && rawDelivery.includes("whatsapp"))) {
+      deliveryChannel = "both";
+    } else if (rawDelivery.includes("whatsapp") || rawDelivery.includes("wa")) {
+      deliveryChannel = "whatsapp";
+    }
+
+    const rawVideoModel = String(row.VideoModel || row.videoModel || "").toLowerCase().trim();
+    const videoModel: "gemini-omni" | "svd" = rawVideoModel.includes("svd") ? "svd" : "gemini-omni";
 
     let parsedDate: Date | null = null;
     try {
@@ -67,11 +91,15 @@ export const parseExcel = (fileBuffer: Buffer): ParsedExcelEvent[] => {
     return {
       Name: Name.trim(),
       Email: Email.trim(),
+      Phone: Phone.trim(),
       PhotoURL: PhotoURL.trim(),
       EventType: EventType.trim(),
       EventDate: parsedDate,
       Department: Department.trim(),
       CustomMessage: CustomMessage.trim(),
+      MediaType: mediaType,
+      DeliveryChannel: deliveryChannel,
+      VideoModel: videoModel,
     };
   });
 };

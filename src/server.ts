@@ -1,4 +1,9 @@
+import path from "path";
 import dotenv from "dotenv";
+
+// Load from backend/.env regardless of current working directory
+dotenv.config({ path: path.resolve(__dirname, "../.env") });
+dotenv.config({ path: path.resolve(__dirname, "../../backend/.env") });
 dotenv.config();
 
 import app from "./app";

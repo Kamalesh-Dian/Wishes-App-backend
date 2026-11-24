@@ -3,6 +3,7 @@ import axios from "axios";
 import sharp from "sharp";
 import { InferenceClient } from "@huggingface/inference";
 import { generateWithGemini } from "./gemini.service";
+import { generateImageWithComfy, getComfyApiUrl } from "../comfy.service";
 import { logger } from "../../utils/logger";
 
 dotenv.config();
@@ -16,9 +17,26 @@ export async function generateWithFlux(
   prompt: string,
   uploadedImage?: string,
 ): Promise<FluxResult> {
+  // 1. Primary: ComfyUI Endpoint (FLUX-2 Klein 4B / FLUX INT8)
+  const comfyUrl = getComfyApiUrl();
+  if (comfyUrl) {
+    try {
+      logger.info({ url: comfyUrl }, "Routing image generation request to ComfyUI endpoint");
+      const comfyResult = await generateImageWithComfy(prompt, uploadedImage);
+      logger.info("Successfully received generated image from ComfyUI");
+      return comfyResult;
+    } catch (comfyErr: unknown) {
+      const err = comfyErr as Error;
+      logger.warn(
+        { err: err.message },
+        "ComfyUI image generation failed; falling back to secondary providers"
+      );
+    }
+  }
+
   const fluxApiUrl = process.env.FLUX_API_URL?.trim();
 
-  // 1. Self-hosted FLUX endpoint (Colab GPU / custom tunnel)
+  // 2. Self-hosted FLUX endpoint (Colab GPU / custom tunnel)
   if (fluxApiUrl) {
     try {
       logger.info({ url: fluxApiUrl }, "Routing FLUX request to custom FLUX endpoint");
@@ -118,21 +136,10 @@ export async function generateWithFlux(
       const errMsg = hfErr instanceof Error ? hfErr.message : String(hfErr);
       logger.warn(
         { err: errMsg, model: fluxModel },
-        "Hugging Face FLUX Inference Provider failed (credits/quota or permission); falling back to secondary provider",
+        "Hugging Face FLUX Inference Provider failed (credits/quota or permission); falling back to Gemini engine",
       );
-
-      // 3. Optional Fallback to Gemini if ENABLE_FLUX_FALLBACK is true
-      if (process.env.ENABLE_FLUX_FALLBACK === "true" && process.env.GEMINI_API_KEY) {
-        logger.info("ENABLE_FLUX_FALLBACK=true: Falling back to Gemini multimodal engine");
-        return await generateWithGemini(prompt, uploadedImage);
-      }
-
       throw hfErr;
     }
-  }
-
-  if (process.env.ENABLE_FLUX_FALLBACK === "true" && process.env.GEMINI_API_KEY) {
-    return await generateWithGemini(prompt, uploadedImage);
   }
 
   throw new Error("No FLUX endpoint, HF_TOKEN, or fallback provider configured");

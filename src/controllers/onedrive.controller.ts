@@ -44,6 +44,14 @@ export async function importOneDriveExcel(req: AuthRequest, res: Response) {
         message: "Unauthorized",
       });
     }
+
+    const userEmail = (req.user?.email || "").toLowerCase();
+    if (userEmail && !userEmail.includes("ultimate") && !userEmail.includes("enterprise") && (userEmail.includes("free") || userEmail.includes("pro"))) {
+      return res.status(403).json({
+        success: false,
+        message: "OneDrive auto-sync is restricted to the Ultimate Plan ($12). Please upgrade your subscription.",
+      });
+    }
     const { fileId, fileName } = req.body;
 
     if (!fileId) {

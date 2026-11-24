@@ -6,11 +6,14 @@ interface MailPayload {
   to: string;
   name: string;
   occasion: string;
-  imageUrl: string;
+  imageUrl?: string;
+  videoUrl?: string;
   customMessage?: string;
 }
 
 export async function sendWishMail(data: MailPayload) {
+  const imageUrl = data.imageUrl || "";
+
   await transporter.sendMail({
     from: process.env.MAIL_FROM,
 
@@ -21,8 +24,9 @@ export async function sendWishMail(data: MailPayload) {
     html: buildWishTemplate(
       data.name,
       data.occasion,
-      data.imageUrl,
+      imageUrl,
       data.customMessage,
+      { videoUrl: data.videoUrl },
     ),
   });
 

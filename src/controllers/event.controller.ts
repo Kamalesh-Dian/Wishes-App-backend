@@ -2,6 +2,8 @@ import type { Response } from "express";
 import type { AuthRequest } from "../middleware/auth";
 import Event from "../models/Event";
 import { parseExcel, type ParsedExcelEvent } from "../services/excel.service";
+import { sendWishMail } from "../services/email/sendWishMail";
+import { sendWishWhatsApp } from "../services/whatsapp/sendWishWhatsApp";
 import { logger } from "../utils/logger";
 
 export const uploadEvents = async (req: AuthRequest, res: Response) => {
@@ -22,6 +24,14 @@ export const uploadEvents = async (req: AuthRequest, res: Response) => {
       return res.status(401).json({
         success: false,
         message: "User not authenticated",
+      });
+    }
+
+    const userEmail = (req.user?.email || "").toLowerCase();
+    if (userEmail && userEmail.includes("free")) {
+      return res.status(403).json({
+        success: false,
+        message: "Event scheduling is restricted to Pro ($5) and Ultimate ($12) plans. Please upgrade your plan.",
       });
     }
 
@@ -51,6 +61,7 @@ export const uploadEvents = async (req: AuthRequest, res: Response) => {
       userId,
       name: row.Name,
       email: row.Email,
+      phone: row.Phone || "",
       photoUrl: row.PhotoURL,
       occasion: row.EventType,
       eventDate: row.EventDate!,
@@ -58,6 +69,9 @@ export const uploadEvents = async (req: AuthRequest, res: Response) => {
       eventDay: row.EventDate!.getDate(),
       department: row.Department,
       customMessage: row.CustomMessage,
+      mediaType: row.MediaType || "image",
+      deliveryChannel: row.DeliveryChannel || "email",
+      videoModel: row.VideoModel || "gemini-omni",
       source: "excel" as const,
       status: "pending" as const,
     }));
@@ -101,6 +115,14 @@ export const getEvents = async (req: AuthRequest, res: Response) => {
       });
     }
 
+    const userEmail = (req.user?.email || "").toLowerCase();
+    if (userEmail && userEmail.includes("free")) {
+      return res.status(403).json({
+        success: false,
+        message: "Event scheduling is restricted to Pro ($5) and Ultimate ($12) plans. Please upgrade your plan.",
+      });
+    }
+
     const filter: Record<string, unknown> = {
       userId,
     };
@@ -130,6 +152,14 @@ export const importJsonEvents = async (req: AuthRequest, res: Response) => {
       return res.status(401).json({
         success: false,
         message: "User not authenticated",
+      });
+    }
+
+    const userEmail = (req.user?.email || "").toLowerCase();
+    if (userEmail && userEmail.includes("free")) {
+      return res.status(403).json({
+        success: false,
+        message: "Event scheduling is restricted to Pro ($5) and Ultimate ($12) plans. Please upgrade your plan.",
       });
     }
 
@@ -245,5 +275,109 @@ export const deleteEvent = async (req: AuthRequest, res: Response) => {
   } catch (error) {
     logger.error({ err: error }, "Error deleting event");
     res.status(500).json({ success: false });
+  }
+};
+
+export const sendEventWhatsApp = async (req: AuthRequest, res: Response) => {
+  try {
+    const { eventId } = req.params;
+    const userId = req.user?.uid;
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "User not authenticated" });
+    }
+
+    const event = await Event.findOne({ _id: eventId, userId });
+    if (!event) {
+      return res.status(404).json({ success: false, message: "Event not found" });
+    }
+
+    const phone = (req.body.phone || event.phone || "").trim();
+    if (!phone) {
+      return res.status(400).json({ success: false, message: "Recipient phone number is required" });
+    }
+
+    const imageUrl = event.generatedWishImage;
+    const videoUrl = event.generatedWishVideo;
+
+    if (!imageUrl && !videoUrl) {
+      return res.status(400).json({ success: false, message: "No generated media available to send. Generate wish first." });
+    }
+
+    const result = await sendWishWhatsApp({
+      phone,
+      name: event.name,
+      occasion: event.occasion,
+      imageUrl,
+      videoUrl,
+      customMessage: event.customMessage,
+    });
+
+    event.whatsappStatus = "sent";
+    if (phone !== event.phone) {
+      event.phone = phone;
+    }
+    await event.save();
+
+    logger.info({ eventId, phone, provider: result.provider }, "Manual WhatsApp dispatch succeeded");
+
+    return res.json({
+      success: true,
+      message: "WhatsApp wish dispatched successfully",
+      result,
+    });
+  } catch (error) {
+    const errMessage = error instanceof Error ? error.message : String(error);
+    logger.error({ err: errMessage }, "Error sending WhatsApp wish");
+    return res.status(500).json({ success: false, message: errMessage });
+  }
+};
+
+export const sendEventEmail = async (req: AuthRequest, res: Response) => {
+  try {
+    const { eventId } = req.params;
+    const userId = req.user?.uid;
+    if (!userId) {
+      return res.status(401).json({ success: false, message: "User not authenticated" });
+    }
+
+    const event = await Event.findOne({ _id: eventId, userId });
+    if (!event) {
+      return res.status(404).json({ success: false, message: "Event not found" });
+    }
+
+    const email = (req.body.email || event.email || "").trim();
+    if (!email) {
+      return res.status(400).json({ success: false, message: "Recipient email is required" });
+    }
+
+    const imageUrl = event.generatedWishImage;
+    const videoUrl = event.generatedWishVideo;
+
+    if (!imageUrl && !videoUrl) {
+      return res.status(400).json({ success: false, message: "No generated media available to send. Generate wish first." });
+    }
+
+    await sendWishMail({
+      to: email,
+      name: event.name,
+      occasion: event.occasion,
+      imageUrl,
+      videoUrl,
+      customMessage: event.customMessage,
+    });
+
+    event.emailStatus = "sent";
+    await event.save();
+
+    logger.info({ eventId, email }, "Manual Email dispatch succeeded");
+
+    return res.json({
+      success: true,
+      message: "Email wish sent successfully",
+    });
+  } catch (error) {
+    const errMessage = error instanceof Error ? error.message : String(error);
+    logger.error({ err: errMessage }, "Error sending email wish");
+    return res.status(500).json({ success: false, message: errMessage });
   }
 };

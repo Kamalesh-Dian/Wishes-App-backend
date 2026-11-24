@@ -4,6 +4,7 @@ import OneDriveConnection from "../../models/OneDriveConnection";
 import { syncOneDriveEvents } from "./sync.service";
 import { generateEventWish } from "./automation.service";
 import { sendWishMail } from "../email/sendWishMail";
+import { sendWishWhatsApp } from "../whatsapp/sendWishWhatsApp";
 import { logger } from "../../utils/logger";
 
 let isRunning = false;
@@ -166,23 +167,73 @@ export async function generateTodayEvents(): Promise<number> {
         await Event.findByIdAndUpdate(event._id, { status: "sending" });
 
         const imageUrl = result.event.generatedWishImage;
-        if (!imageUrl) {
-          throw new Error("Generated image URL is missing");
+        const videoUrl = result.event.generatedWishVideo;
+        if (!imageUrl && !videoUrl) {
+          throw new Error("Neither generated image nor video URL is present");
         }
 
-        await sendWishMail({
-          to: event.email,
-          name: event.name,
-          occasion: event.occasion,
-          imageUrl,
-          customMessage: event.customMessage,
-        });
+        const channel = event.deliveryChannel || "email";
+        let emailSuccess = false;
+        let whatsappSuccess = false;
+
+        // 1. Send Email if channel is email or both
+        if (channel === "email" || channel === "both") {
+          try {
+            await sendWishMail({
+              to: event.email,
+              name: event.name,
+              occasion: event.occasion,
+              imageUrl,
+              videoUrl,
+              customMessage: event.customMessage,
+            });
+            emailSuccess = true;
+            await Event.findByIdAndUpdate(event._id, { emailStatus: "sent" });
+            logger.info({ eventId: event._id, recipient: event.email }, "Automation email delivered");
+          } catch (mailErr) {
+            logger.error({ eventId: event._id, err: mailErr }, "Automation email failed");
+            await Event.findByIdAndUpdate(event._id, { emailStatus: "failed" });
+            if (channel === "email") throw mailErr;
+          }
+        }
+
+        // 2. Send WhatsApp if channel is whatsapp or both
+        if (channel === "whatsapp" || channel === "both") {
+          const phone = event.phone?.trim();
+          if (!phone) {
+            logger.warn({ eventId: event._id, name: event.name }, "WhatsApp delivery requested but no phone number provided");
+            await Event.findByIdAndUpdate(event._id, { whatsappStatus: "failed" });
+            if (channel === "whatsapp") {
+              throw new Error("Phone number missing for WhatsApp delivery");
+            }
+          } else {
+            try {
+              const waResult = await sendWishWhatsApp({
+                phone,
+                name: event.name,
+                occasion: event.occasion,
+                imageUrl,
+                videoUrl,
+                customMessage: event.customMessage,
+              });
+              whatsappSuccess = waResult.success;
+              await Event.findByIdAndUpdate(event._id, {
+                whatsappStatus: "sent",
+              });
+              logger.info({ eventId: event._id, phone, provider: waResult.provider }, "Automation WhatsApp delivered");
+            } catch (waErr) {
+              logger.error({ eventId: event._id, err: waErr }, "Automation WhatsApp failed");
+              await Event.findByIdAndUpdate(event._id, { whatsappStatus: "failed" });
+              if (channel === "whatsapp") throw waErr;
+            }
+          }
+        }
 
         await Event.findByIdAndUpdate(event._id, {
           status: "sent",
           lastError: undefined,
         });
-        logger.info({ eventId: event._id, name: event.name }, "Event completed successfully");
+        logger.info({ eventId: event._id, name: event.name, channel, emailSuccess, whatsappSuccess }, "Event completed successfully");
       } catch (error) {
         const errMessage = error instanceof Error ? error.message : String(error);
         logger.error({ eventId: event._id, name: event.name, err: errMessage }, "Automation failed for event");

@@ -3,6 +3,7 @@ export interface EmailTemplateOptions {
   accentColor?: string;
   signature?: string;
   companyFooter?: string;
+  videoUrl?: string;
 }
 
 export function escapeHtml(str: string): string {
@@ -66,6 +67,14 @@ export function buildWishTemplate(
     ? options!.accentColor!
     : "#0d9488";
 
+  const videoSection = options?.videoUrl
+    ? `
+  <div style="margin-top: 24px; padding: 18px; background: #f8fafc; border-radius: 12px; border: 1px solid #e2e8f0; text-align: center;">
+    <p style="margin: 0 0 12px 0; font-weight: bold; color: #1e293b; font-size: 15px;">🎬 Celebration Motion Video</p>
+    <a href="${options.videoUrl}" target="_blank" style="display: inline-block; background: ${accentColor}; color: white; padding: 10px 20px; border-radius: 8px; text-decoration: none; font-weight: bold; font-size: 14px;">▶️ Watch Celebration Video</a>
+  </div>`
+    : "";
+
   return `
 <!DOCTYPE html>
 <html>
@@ -116,6 +125,7 @@ img {
   <h2>${safeHeader}</h2>
   <p>${safeCustomMessage}</p>
   <img src="${imageUrl}" />
+  ${videoSection}
   <div class="footer">
     ${safeSignature}
     <div class="company">${safeCompanyFooter}</div>

@@ -2,7 +2,16 @@ import express from "express";
 import multer from "multer";
 import { auth } from "../middleware/auth";
 
-import { uploadEvents, getEvents, importJsonEvents, saveGeneratedWish, updateEvent, deleteEvent } from "../controllers/event.controller";
+import {
+  uploadEvents,
+  getEvents,
+  importJsonEvents,
+  saveGeneratedWish,
+  updateEvent,
+  deleteEvent,
+  sendEventWhatsApp,
+  sendEventEmail,
+} from "../controllers/event.controller";
 
 const router = express.Router();
 
@@ -19,5 +28,7 @@ router.post("/import-json", importJsonEvents);
 router.put("/:eventId/generated", saveGeneratedWish);
 router.put("/:eventId", updateEvent);
 router.delete("/:eventId", deleteEvent);
+router.post("/:eventId/send-whatsapp", sendEventWhatsApp);
+router.post("/:eventId/send-email", sendEventEmail);
 
 export default router;
