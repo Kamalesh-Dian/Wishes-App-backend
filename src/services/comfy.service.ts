@@ -3,6 +3,11 @@ import sharp from "sharp";
 import { logger } from "../utils/logger";
 import { uploadVideoToCloudinary } from "./cloudinary.service";
 import { NEGATIVE_PROMPT } from "./promptBuilder";
+import {
+  getImageGenerationTimeoutMs,
+  getVideoGenerationTimeoutMs,
+  getComfyPollIntervalMs,
+} from "../config/timeouts";
 import type { GenerateVideoModelOptions, VideoModelResult } from "./video.service";
 
 interface ComfyUploadResponse {
@@ -54,6 +59,17 @@ export async function isComfyUIAvailable(): Promise<boolean> {
   try {
     const res = await axios.get(`${url}/system_stats`, { timeout: 8000 });
     return res.status === 200;
+  } catch {
+    return false;
+  }
+}
+
+async function hasComfyNode(comfyUrl: string, nodeName: string): Promise<boolean> {
+  try {
+    const res = await axios.get<Record<string, unknown>>(`${comfyUrl}/object_info/${nodeName}`, {
+      timeout: 5000,
+    });
+    return Boolean(res.status === 200 && res.data && Object.prototype.hasOwnProperty.call(res.data, nodeName));
   } catch {
     return false;
   }
@@ -127,8 +143,10 @@ async function waitForComfyOutput(
 
   const videoExtensions = new Set([".mp4", ".webp", ".gif", ".webm", ".mov", ".avi", ".mkv"]);
 
+  const pollIntervalMs = getComfyPollIntervalMs();
+
   while (Date.now() - startTime < timeoutMs) {
-    await new Promise((r) => setTimeout(r, 2000));
+    await new Promise((r) => setTimeout(r, pollIntervalMs));
 
     try {
       const res = await axios.get<ComfyHistoryResponse>(`${comfyUrl}/history/${promptId}`, {
@@ -302,7 +320,9 @@ export async function generateImageWithComfy(
   };
 
   let latentRef: [string, number];
-  let denoise = 1.0;
+  let positiveRef: [string, number] = ["4", 0];
+  let negativeRef: [string, number] = ["5", 0];
+  const denoise = 1.0;
 
   if (uploadedFileName) {
     promptGraph["6"] = {
@@ -318,8 +338,25 @@ export async function generateImageWithComfy(
         vae: ["3", 0],
       },
     };
+    // FLUX.2 Klein reference conditioning: preserves uploaded person's exact face/identity
+    // while denoising from fresh noise (denoise: 1.0) so pose, outfit, and scene can change naturally.
+    promptGraph["12"] = {
+      class_type: "ReferenceLatent",
+      inputs: {
+        conditioning: ["4", 0],
+        latent: ["7", 0],
+      },
+    };
+    promptGraph["13"] = {
+      class_type: "ReferenceLatent",
+      inputs: {
+        conditioning: ["5", 0],
+        latent: ["7", 0],
+      },
+    };
+    positiveRef = ["12", 0];
+    negativeRef = ["13", 0];
     latentRef = ["7", 0];
-    denoise = 0.8;
   } else {
     promptGraph["6"] = {
       class_type: "EmptySD3LatentImage",
@@ -330,20 +367,19 @@ export async function generateImageWithComfy(
       },
     };
     latentRef = ["6", 0];
-    denoise = 1.0;
   }
 
   promptGraph["8"] = {
     class_type: "KSampler",
     inputs: {
       model: ["11", 0],
-      positive: ["4", 0],
-      negative: ["5", 0],
+      positive: positiveRef,
+      negative: negativeRef,
       latent_image: latentRef,
       seed: Math.floor(Math.random() * 10000000),
-      steps: 8,
+      steps: 4,
       cfg: 1.0,
-      sampler_name: "res_multistep",
+      sampler_name: "euler",
       scheduler: "simple",
       denoise,
     },
@@ -371,7 +407,7 @@ export async function generateImageWithComfy(
   });
 
   const promptId = promptData.prompt_id;
-  const fileInfo = await waitForComfyOutput(promptId, 180000);
+  const fileInfo = await waitForComfyOutput(promptId, getImageGenerationTimeoutMs());
   const fileBuffer = await downloadComfyFile(fileInfo);
 
   return {
@@ -428,7 +464,11 @@ export async function generateVideoWithComfy(
     : Math.min(100, Math.max(60, envMotionBucket));
 
   // 2. Build SVD XT Workflow Graph (no text prompts; motion controlled via motion_bucket_id)
-  const promptGraph = {
+  const supportsSaveVideo =
+    (await hasComfyNode(comfyUrl, "CreateVideo")) &&
+    (await hasComfyNode(comfyUrl, "SaveVideo"));
+
+  const promptGraph: Record<string, unknown> = {
     "1": {
       class_type: "ImageOnlyCheckpointLoader",
       inputs: {
@@ -477,18 +517,55 @@ export async function generateVideoWithComfy(
         vae: ["1", 2],
       },
     },
-    "6": {
+  };
+
+  // Compute optimal FPS and seamless boomerang extension for 4s-8s while keeping SVD at 25 frames (zero face drift):
+  // 4s -> 6 fps forward (~4.2s) | 5s -> 5 fps forward (5.0s)
+  // 6s -> 8 fps boomerang (~6.25s) | 7s -> 7 fps boomerang (~7.1s) | 8s -> 6 fps boomerang (~8.3s)
+  const useBoomerang = effectiveDuration >= 6;
+  const outputFps =
+    effectiveDuration === 4
+      ? 6
+      : effectiveDuration === 5
+        ? 5
+        : effectiveDuration === 6
+          ? 8
+          : effectiveDuration === 7
+            ? 7
+            : 6;
+
+  if (supportsSaveVideo) {
+    logger.info({ effectiveDuration, outputFps, useBoomerang }, "Using ComfyUI native CreateVideo + SaveVideo (H.264 MP4) output nodes");
+    promptGraph["6"] = {
+      class_type: "CreateVideo",
+      inputs: {
+        images: ["5", 0],
+        fps: outputFps,
+      },
+    };
+    promptGraph["7"] = {
+      class_type: "SaveVideo",
+      inputs: {
+        video: ["6", 0],
+        filename_prefix: "WishesAI_SVD",
+        format: "mp4",
+        codec: "h264",
+      },
+    };
+  } else {
+    logger.info({ effectiveDuration, outputFps, useBoomerang }, "ComfyUI SaveVideo node unavailable; using SaveAnimatedWEBP with Cloudinary MP4 transcoding");
+    promptGraph["6"] = {
       class_type: "SaveAnimatedWEBP",
       inputs: {
         images: ["5", 0],
         filename_prefix: "WishesAI_SVD",
-        fps: 6,
+        fps: outputFps,
         lossless: false,
         quality: 90,
         method: "default",
       },
-    },
-  };
+    };
+  }
 
   // 3. Queue prompt
   const promptData = await postPromptWithRetry(comfyUrl, {
@@ -497,12 +574,15 @@ export async function generateVideoWithComfy(
   });
 
   const promptId = promptData.prompt_id;
-  const fileInfo = await waitForComfyOutput(promptId, 300000, true);
+  const fileInfo = await waitForComfyOutput(promptId, getVideoGenerationTimeoutMs(), true);
   const fileBuffer = await downloadComfyFile(fileInfo);
 
-  // 4. Upload generated video/animation directly to Cloudinary CDN
-  const base64Data = `data:image/webp;base64,${fileBuffer.toString("base64")}`;
-  const secureUrl = await uploadVideoToCloudinary(base64Data);
+  // 4. Upload generated video directly to Cloudinary CDN as MP4 (with seamless boomerang for 6s-8s)
+  const isMp4 = fileInfo.filename.toLowerCase().endsWith(".mp4");
+  const base64Data = isMp4
+    ? `data:video/mp4;base64,${fileBuffer.toString("base64")}`
+    : `data:image/webp;base64,${fileBuffer.toString("base64")}`;
+  const secureUrl = await uploadVideoToCloudinary(base64Data, { boomerang: useBoomerang });
 
   return {
     videoUrl: secureUrl,

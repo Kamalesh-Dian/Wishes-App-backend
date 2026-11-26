@@ -21,15 +21,14 @@ export async function generateImage(
       const fluxResult = await generateWithFlux(prompt, uploadedImage);
       return fluxResult;
     } catch (fluxErr) {
-      logger.warn(
-        { err: fluxErr instanceof Error ? fluxErr.message : fluxErr },
-        "All FLUX providers failed; executing honest fallback to Gemini"
+      const reason = fluxErr instanceof Error ? fluxErr.message : String(fluxErr);
+      logger.error(
+        { err: reason },
+        "FLUX image generation failed; not falling back automatically"
       );
-      const geminiResult = await generateWithGemini(prompt, uploadedImage);
-      return {
-        ...geminiResult,
-        provider: "gemini-fallback",
-      };
+      throw new Error(
+        `FLUX image generation failed: ${reason}. Please try again or switch to another AI model.`
+      );
     }
   }
 

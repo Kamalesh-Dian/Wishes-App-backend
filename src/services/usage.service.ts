@@ -1,5 +1,5 @@
 import Wish from "../models/Wish";
-import { getBillingMonthRange } from "../config/plans";
+import { getBillingMonthRange, getEffectiveUsageStart } from "../config/plans";
 
 export interface MonthlyUsage {
   images: number;
@@ -13,10 +13,11 @@ export interface MonthlyUsage {
  */
 export async function getUserMonthlyUsage(userId: string, date: Date = new Date()): Promise<MonthlyUsage> {
   const { start, end } = getBillingMonthRange(date);
+  const effectiveStart = getEffectiveUsageStart(start, end);
 
   const images = await Wish.countDocuments({
     user: userId,
-    createdAt: { $gte: start, $lt: end },
+    createdAt: { $gte: effectiveStart, $lt: end },
     $or: [
       { status: { $in: ["done", "video", "image"] } },
       { imageUrl: { $exists: true, $ne: "" } },
@@ -25,7 +26,7 @@ export async function getUserMonthlyUsage(userId: string, date: Date = new Date(
 
   const videos = await Wish.countDocuments({
     user: userId,
-    createdAt: { $gte: start, $lt: end },
+    createdAt: { $gte: effectiveStart, $lt: end },
     videoUrl: { $exists: true, $nin: [null, ""] },
   });
 

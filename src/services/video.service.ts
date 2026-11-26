@@ -3,6 +3,7 @@ import axios from "axios";
 import { uploadToCloudinary, uploadVideoToCloudinary, generateDynamicMotionVideoUrl } from "./cloudinary.service";
 import { buildVideoPrompt } from "./videoPromptBuilder";
 import { generateVideoWithComfy, getComfyApiUrl } from "./comfy.service";
+import { getVideoGenerationTimeoutMs } from "../config/timeouts";
 import { logger } from "../utils/logger";
 
 dotenv.config();
@@ -104,7 +105,7 @@ export async function generateVideoWithGeminiOmni(
         "Content-Type": "application/json",
         "x-goog-api-key": apiKey,
       },
-      timeout: 180000, // 3 minutes timeout for video synthesis
+      timeout: getVideoGenerationTimeoutMs(),
     }
   );
 
@@ -172,20 +173,80 @@ export async function generateVideoWithModel(
   } = options;
 
   const effectiveDuration = Math.min(8, Math.max(4, Math.round(duration)));
-  const isSvdRequested = options.aiEngine === "svd" || options.aiEngine === "comfy";
+  const isFluxOrSvdRequested =
+    options.aiEngine === "svd" ||
+    options.aiEngine === "comfy" ||
+    options.aiEngine === "flux";
 
-  // 0. DIRECT SVD OVERRIDE: If caller explicitly requests SVD, dispatch directly to ComfyUI
-  if (isSvdRequested && getComfyApiUrl()) {
-    try {
-      logger.info({ model: "svd_xt_1_1" }, "Direct SVD XT 1.1 requested; routing to ComfyUI");
-      return await generateVideoWithComfy(options);
-    } catch (svdErr: unknown) {
-      const err = svdErr as Error;
-      logger.warn(
-        { err: err.message },
-        "ComfyUI SVD direct execution failed, falling back to Gemini Omni"
-      );
+  // 0. STRICT FLUX / SVD MODE: If caller explicitly requested FLUX/SVD, stick to it — do NOT fall back to Gemini or Cloudinary
+  if (isFluxOrSvdRequested) {
+    let lastError = "No FLUX / ComfyUI SVD endpoint is configured";
+
+    if (getComfyApiUrl()) {
+      try {
+        logger.info({ model: "svd_xt_1_1", aiEngine: options.aiEngine }, "Strict FLUX/SVD video requested; routing to ComfyUI");
+        return await generateVideoWithComfy(options);
+      } catch (svdErr: unknown) {
+        const err = svdErr as Error;
+        lastError = err.message || "ComfyUI SVD execution failed";
+        logger.error({ err: lastError }, "ComfyUI SVD video generation failed");
+      }
     }
+
+    const fluxVideoUrl = (process.env.VIDEO_API_URL || process.env.FLUX_API_URL)?.trim();
+    if (fluxVideoUrl) {
+      try {
+        logger.info({ url: fluxVideoUrl, duration: effectiveDuration }, "Dispatching strict FLUX/SVD video request to GPU Model Server");
+        const prompt = buildVideoPrompt({
+          duration: effectiveDuration,
+          motionStyle,
+          occasion,
+        });
+        const res = await axios.post<string | { video?: string; image?: string; mime_type?: string; error?: string; model?: string }>(
+          `${fluxVideoUrl}/generate-video`,
+          {
+            image: imageUrl,
+            prompt,
+            duration_sec: effectiveDuration,
+            fps: 25,
+            style: motionStyle,
+          },
+          {
+            headers: { "Content-Type": "application/json" },
+            timeout: getVideoGenerationTimeoutMs(),
+            responseType: "text",
+          }
+        );
+        const parsed: { video?: string; image?: string; mime_type?: string; error?: string; model?: string } =
+          typeof res.data === "string" ? JSON.parse(res.data.trim()) : res.data;
+        if (parsed.error) {
+          throw new Error(parsed.error);
+        }
+        if (parsed && (parsed.video || parsed.image)) {
+          const videoBase64 = parsed.video || parsed.image!;
+          const mimeType = parsed.mime_type || "video/mp4";
+          const secureUrl = await uploadVideoToCloudinary(
+            videoBase64.startsWith("data:") ? videoBase64 : `data:${mimeType};base64,${videoBase64}`
+          );
+          return {
+            videoUrl: secureUrl,
+            duration: effectiveDuration,
+            mimeType: "video/mp4",
+            model: parsed.model || "Stable Video Diffusion (FLUX GPU)",
+            tier: "ai-video",
+          };
+        }
+        lastError = "GPU video endpoint returned no video data";
+      } catch (gpuErr: unknown) {
+        const err = gpuErr as Error;
+        lastError = err.message || "FLUX GPU video endpoint failed";
+        logger.error({ err: lastError }, "FLUX GPU video endpoint failed");
+      }
+    }
+
+    throw new Error(
+      `FLUX / SVD video generation failed: ${lastError}. Please try again or switch to another AI model.`
+    );
   }
 
   // 1. FIRST: Use gemini-omni-1.2-flash as instructed by the user
@@ -242,7 +303,7 @@ export async function generateVideoWithModel(
           },
           {
             headers: { "Content-Type": "application/json" },
-            timeout: 300000,
+            timeout: getVideoGenerationTimeoutMs(),
             responseType: "text",
           }
         );

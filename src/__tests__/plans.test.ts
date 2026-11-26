@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { PLAN_LIMITS, getBillingMonthRange } from "../config/plans";
+import { PLAN_LIMITS, getBillingMonthRange, getPlanConfigMap } from "../config/plans";
 import Wish from "../models/Wish";
 import User from "../models/User";
 import { getUserMonthlyUsage } from "../services/usage.service";
@@ -12,9 +12,33 @@ describe("Task 8: Subscription Tiers and Plan Limits", () => {
   });
 
   it("defines correct plan limits for free, pro, and ultimate", () => {
-    expect(PLAN_LIMITS.free).toEqual({ images: 5, videos: 0 });
+    expect(PLAN_LIMITS.free).toEqual({ images: 5, videos: 3 });
     expect(PLAN_LIMITS.pro).toEqual({ images: 40, videos: 10 });
     expect(PLAN_LIMITS.ultimate).toEqual({ images: 75, videos: 25 });
+  });
+
+  it("reads configurable plan pricing and quotas from environment variables", () => {
+    const prevProPrice = process.env.PLAN_PRO_PRICE;
+    const prevProImages = process.env.PLAN_PRO_IMAGES;
+    const prevCurrency = process.env.PLAN_CURRENCY;
+
+    process.env.PLAN_CURRENCY = "₹";
+    process.env.PLAN_PRO_PRICE = "499";
+    process.env.PLAN_PRO_IMAGES = "60";
+
+    try {
+      const cfg = getPlanConfigMap();
+      expect(cfg.pro.currency).toBe("₹");
+      expect(cfg.pro.price).toBe(499);
+      expect(cfg.pro.images).toBe(60);
+    } finally {
+      if (prevProPrice !== undefined) process.env.PLAN_PRO_PRICE = prevProPrice;
+      else delete process.env.PLAN_PRO_PRICE;
+      if (prevProImages !== undefined) process.env.PLAN_PRO_IMAGES = prevProImages;
+      else delete process.env.PLAN_PRO_IMAGES;
+      if (prevCurrency !== undefined) process.env.PLAN_CURRENCY = prevCurrency;
+      else delete process.env.PLAN_CURRENCY;
+    }
   });
 
   it("computes monthly billing range starting from day 1 of current month", () => {
@@ -41,13 +65,15 @@ describe("Task 8: Subscription Tiers and Plan Limits", () => {
     expect(mockCountDocuments).toHaveBeenCalledTimes(2);
   });
 
-  it("free user cannot generate video and receives 403 with upgrade message", async () => {
+  it("free user receives 403 when 3 video generations limit is reached", async () => {
     vi.spyOn(User, "findOne").mockResolvedValue({
       uid: "free-user-1",
       plan: "free",
     } as any);
 
-    vi.spyOn(Wish, "countDocuments").mockResolvedValue(0);
+    vi.spyOn(Wish, "countDocuments")
+      .mockResolvedValueOnce(1) // images usage
+      .mockResolvedValueOnce(3); // videos usage (3/3 reached)
 
     const req: any = {
       user: { uid: "free-user-1", email: "user@example.com" },
@@ -74,7 +100,46 @@ describe("Task 8: Subscription Tiers and Plan Limits", () => {
     await generateWish(req, res);
 
     expect(statusCaptured).toBe(403);
-    expect(jsonCaptured?.error).toContain("Video generation is not available on the Free plan");
+    expect(jsonCaptured?.error).toContain("Video generation limit reached for FREE plan (3/3 videos used)");
+  });
+
+  it("free user can generate image when animationEnabled is false even if videoModel is passed", async () => {
+    vi.spyOn(User, "findOne").mockResolvedValue({
+      uid: "free-user-1",
+      plan: "free",
+    } as any);
+
+    vi.spyOn(Wish, "countDocuments").mockResolvedValue(0);
+    vi.spyOn(Wish, "create").mockResolvedValue({
+      _id: "wish-free-img-123",
+      status: "queued",
+    } as any);
+
+    const req: any = {
+      user: { uid: "free-user-1", email: "user@example.com" },
+      body: {
+        occasion: "Birthday",
+        theme: "Festive Home",
+        animationEnabled: false,
+        videoModel: "gemini-omni",
+        aiEngine: "gemini",
+      },
+    };
+
+    let jsonCaptured: any = null;
+    const res: any = {
+      json: (data: any) => {
+        jsonCaptured = data;
+        return res;
+      },
+      status: () => res,
+    };
+
+    await generateWish(req, res);
+
+    expect(jsonCaptured?.success).toBe(true);
+    expect(jsonCaptured?.status).toBe("queued");
+    expect(jsonCaptured?.wishId).toBe("wish-free-img-123");
   });
 
   it("returns 403 with upgrade message when image limit is reached", async () => {

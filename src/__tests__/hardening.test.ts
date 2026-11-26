@@ -40,4 +40,11 @@ describe("App Hardening & Security Middleware (Item 3)", () => {
     // express-rate-limit standardHeaders draft-8 sets ratelimit headers
     expect(res.headers["ratelimit-limit"] || res.headers["x-ratelimit-limit"]).toBeDefined();
   });
+
+  it("should skip strict rate limiting on async status polling endpoint", async () => {
+    const res = await request(app).get("/api/generate/test-wish-id/status");
+    // Skipped by both generalLimiter and strictLimiter, so no ratelimit headers and never 429
+    expect(res.status).not.toBe(429);
+    expect(res.headers["ratelimit-limit"]).toBeUndefined();
+  });
 });

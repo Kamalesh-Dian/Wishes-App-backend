@@ -55,6 +55,7 @@ export async function processWishJob(
     additionalInformation?: string;
     customMessage?: string;
     animationEnabled?: boolean;
+    videoDuration?: number;
   },
   userId: string
 ): Promise<void> {
@@ -149,11 +150,14 @@ export async function processWishJob(
           people: data.people,
           decorations: data.decorations,
           additionalInformation: data.additionalInformation,
-          duration: chosenVideoModel === "svd" ? 4 : 8,
+          duration: data.videoDuration || 8,
           aiEngine: chosenVideoModel === "svd" ? "svd" : "gemini",
         });
         videoUrl = videoRes.videoUrl;
       } catch (vidErr) {
+        if (chosenVideoModel === "svd" || data.aiEngine === "flux" || data.aiEngine === "svd") {
+          throw vidErr;
+        }
         logger.warn({ wishId, err: vidErr }, "Video synthesis failed; falling back to image-only");
       }
     }

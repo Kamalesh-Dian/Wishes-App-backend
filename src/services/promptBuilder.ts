@@ -40,11 +40,14 @@ export function buildFluxPrompt(data: BuildPromptOptions): string {
   const lines: string[] = [
     `Edit the provided photo into a ${occasionClean} celebration image.`,
     "Keep the same person: identical face, facial structure, skin tone, hair, age and expression style. Do not alter or idealize the face.",
-    "Change only the clothing, background and surroundings.",
+    "Place this exact person naturally into the celebration scene with a relaxed, joyful celebratory pose, festive clothing, and new background and surroundings.",
   ];
 
   if (occasionOutfit) {
-    lines.push(`Outfit: ${occasionOutfit}.`);
+    lines.push(
+      `Outfit: ${occasionOutfit}.`,
+      "Completely replace all original clothing and remove any lanyard, ID card, badge, strap, or hoodie from the reference photo. Keep the new outfit clean, modern, and tasteful with no tinsel or garlands draped on the clothes."
+    );
   }
 
   if (themeDescription) {
@@ -56,7 +59,8 @@ export function buildFluxPrompt(data: BuildPromptOptions): string {
   }
 
   lines.push(
-    "Lighting and style: warm cinematic lighting, natural skin texture, realistic photography, shallow depth of field.",
+    "Appearance: preserve the exact same person from the reference photo—identical face shape, jawline, glasses, hairstyle, skin tone, and exact apparent age with fresh, smooth, healthy skin. Keep their exact likeness and natural expression without widening or aging the face.",
+    "Lighting and style: soft flattering diffused portrait lighting, even natural skin tone, realistic photography, shallow depth of field.",
     "Composition: subject centered in the lower two-thirds, with clear empty space at the top for a caption.",
     "Do not add any text, letters, logos or watermarks."
   );

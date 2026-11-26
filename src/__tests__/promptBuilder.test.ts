@@ -58,4 +58,16 @@ describe("Task 1: Prompt Builder", () => {
       "extra fingers, distorted face, different person, older face, plastic skin, blurry, text, watermark"
     );
   });
+
+  it("includes positive age-preservation, accessory removal, and soft portrait lighting cues", () => {
+    const prompt = buildFluxPrompt({
+      occasion: "Festival",
+      theme: "Festive Home",
+    });
+
+    expect(prompt).toContain("exact apparent age with fresh, smooth, healthy skin");
+    expect(prompt).toContain("remove any lanyard, ID card, badge");
+    expect(prompt).toContain("soft flattering diffused portrait lighting");
+    expect(prompt).not.toContain("natural skin texture");
+  });
 });

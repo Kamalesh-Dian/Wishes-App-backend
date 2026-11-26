@@ -48,6 +48,10 @@ export const occasionMap: Record<string, OccasionDetail> = {
     outfit: "formal academic cap and graduation gown over smart dress",
     scene: "proud graduation milestone celebration setting",
   },
+  Festival: {
+    outfit: "clean modern tailored festive kurta or smart-casual blazer over a crisp solid shirt, neat and stylish",
+    scene: "vibrant joyful festival celebration setting",
+  },
 };
 
 export const DEFAULT_OCCASION_DETAIL: OccasionDetail = {

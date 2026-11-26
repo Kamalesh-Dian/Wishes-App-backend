@@ -36,6 +36,7 @@ const generateWishSchema = z.object({
     .optional(),
   customMessage: z.string().optional(),
   animationEnabled: z.boolean().optional().default(false),
+  videoDuration: z.number().min(4).max(8).optional().default(8),
 });
 
 export async function generateWish(req: AuthRequest, res: Response) {
@@ -93,8 +94,10 @@ export async function generateWish(req: AuthRequest, res: Response) {
       });
     }
 
-    const effectiveVideoModel = data.videoModel || (data.aiEngine === "svd" ? "svd" : data.aiEngine === "gemini-omni" ? "gemini-omni" : undefined);
-    const isVideoRequest = Boolean(data.animationEnabled || effectiveVideoModel);
+    const isVideoRequest = Boolean(data.animationEnabled);
+    const effectiveVideoModel = isVideoRequest
+      ? (data.videoModel || (data.aiEngine === "svd" ? "svd" : "gemini-omni"))
+      : undefined;
 
     if (isVideoRequest) {
       if (limits.videos === 0) {
@@ -180,7 +183,8 @@ export async function getWishStatus(req: AuthRequest, res: Response) {
     return res.json({
       success: true,
       status: wish.status || "queued",
-      imageUrl: wish.generatedImage || "",
+      imageUrl: wish.generatedImage || wish.cleanImage || "",
+      generatedImage: wish.generatedImage || wish.cleanImage || "",
       cleanImageUrl: wish.cleanImage || "",
       videoUrl: wish.videoUrl || "",
       error: wish.error,

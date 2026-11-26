@@ -2,8 +2,8 @@ import dotenv from "dotenv";
 import axios from "axios";
 import sharp from "sharp";
 import { InferenceClient } from "@huggingface/inference";
-import { generateWithGemini } from "./gemini.service";
 import { generateImageWithComfy, getComfyApiUrl } from "../comfy.service";
+import { getImageGenerationTimeoutMs } from "../../config/timeouts";
 import { logger } from "../../utils/logger";
 
 dotenv.config();
@@ -54,7 +54,7 @@ export async function generateWithFlux(
           },
           {
             headers: { "Content-Type": "application/json" },
-            timeout: 300000, // 5 minutes to support chunked keep-alive stream from Colab GPU
+            timeout: getImageGenerationTimeoutMs(),
             responseType: "text",
           },
         );
@@ -175,7 +175,7 @@ export async function generateWithFlux(
       const errMsg = hfErr instanceof Error ? hfErr.message : String(hfErr);
       logger.warn(
         { err: errMsg, model: fluxModel },
-        "Hugging Face FLUX Inference Provider failed; falling back to Gemini in image service",
+        "Hugging Face FLUX Inference Provider failed",
       );
       throw hfErr;
     }

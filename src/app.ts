@@ -50,27 +50,31 @@ app.use(
   }),
 );
 
-// General rate limiter for all /api endpoints
+// General rate limiter for all /api endpoints (skip async job status polling)
 const generalLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  limit: 100,
+  limit: 300,
   standardHeaders: "draft-8",
   legacyHeaders: true,
+  skip: (req) => req.method === "GET" && req.path.endsWith("/status"),
   message: {
     success: false,
+    error: "Too many requests, please try again later.",
     message: "Too many requests, please try again later.",
   },
 });
 app.use("/api", generalLimiter);
 
-// Stricter rate limiter for expensive generation and upload endpoints
+// Stricter rate limiter for expensive generation and upload endpoints (skip GET /:wishId/status polling)
 const strictLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  limit: 20,
+  limit: 30,
   standardHeaders: "draft-8",
   legacyHeaders: true,
+  skip: (req) => req.method === "GET" && req.path.endsWith("/status"),
   message: {
     success: false,
+    error: "Too many generation/upload requests, please slow down.",
     message: "Too many generation/upload requests, please slow down.",
   },
 });
