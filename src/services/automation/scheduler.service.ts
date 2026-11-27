@@ -8,9 +8,53 @@ import { sendWishWhatsApp } from "../whatsapp/sendWishWhatsApp";
 import { logger } from "../../utils/logger";
 
 let isRunning = false;
+let isSyncRunning = false;
 
 export function isSchedulerRunning(): boolean {
   return isRunning;
+}
+
+export function isExcelSyncRunning(): boolean {
+  return isSyncRunning;
+}
+
+/**
+ * Automation 1: Syncs events from all active OneDrive Excel connections independently
+ * of image/video generation & sending.
+ */
+export async function syncAllOneDriveEvents(): Promise<number> {
+  if (isSyncRunning) {
+    logger.info("Excel/OneDrive sync is already running. Skipping concurrent sync.");
+    return 0;
+  }
+
+  isSyncRunning = true;
+  let syncedConnections = 0;
+
+  try {
+    const activeConnections = await OneDriveConnection.find({ syncEnabled: true });
+    for (const connection of activeConnections) {
+      if (connection.accessToken) {
+        try {
+          logger.info({ fileName: connection.fileName }, "Auto-syncing OneDrive Excel file");
+          await syncOneDriveEvents(connection.userId, connection.accessToken);
+          syncedConnections++;
+        } catch (syncErr: unknown) {
+          const err = syncErr as { message?: string };
+          logger.error(
+            { fileName: connection.fileName, err: err?.message || syncErr },
+            "Auto-sync failed for OneDrive connection"
+          );
+        }
+      }
+    }
+    return syncedConnections;
+  } catch (err) {
+    logger.error({ err }, "Error during OneDrive Excel auto-sync");
+    return syncedConnections;
+  } finally {
+    isSyncRunning = false;
+  }
 }
 
 /**
@@ -73,24 +117,6 @@ export async function generateTodayEvents(): Promise<number> {
       await recoverStuckEvents();
     } catch (recoverErr) {
       logger.error({ err: recoverErr }, "Error recovering stuck events");
-    }
-
-    // 2. Sync connected OneDrive Excel sheets before processing events
-    try {
-      const activeConnections = await OneDriveConnection.find({ syncEnabled: true });
-      for (const connection of activeConnections) {
-        if (connection.accessToken) {
-          try {
-            logger.info({ fileName: connection.fileName }, "Auto-syncing OneDrive file");
-            await syncOneDriveEvents(connection.userId, connection.accessToken);
-          } catch (syncErr: unknown) {
-            const err = syncErr as { message?: string };
-            logger.error({ fileName: connection.fileName, err: err?.message || syncErr }, "Auto-sync failed");
-          }
-        }
-      }
-    } catch (err) {
-      logger.error({ err }, "Error during OneDrive auto-sync");
     }
 
     const targetDates = getTodayTargetDates();

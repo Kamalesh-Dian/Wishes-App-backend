@@ -2,7 +2,6 @@ import { describe, it, expect, vi } from "vitest";
 import { generateImage } from "../services/image.service";
 import * as fluxService from "../services/providers/flux.service";
 import * as geminiService from "../services/providers/gemini.service";
-import * as cloudinaryService from "../services/cloudinary.service";
 import { generateVideoWithModel } from "../services/video.service";
 
 describe("Task 5: Honest Fallbacks", () => {
@@ -34,7 +33,7 @@ describe("Task 5: Honest Fallbacks", () => {
           occasion: "Birthday",
           aiEngine: "flux",
         })
-      ).rejects.toThrow(/FLUX \/ SVD video generation failed.*switch to another AI model/i);
+      ).rejects.toThrow(/FLUX \/ SVD video generation failed.*switch to another AI video model/i);
     } finally {
       if (prevComfy !== undefined) process.env.COMFY_API_URL = prevComfy;
       if (prevVideo !== undefined) process.env.VIDEO_API_URL = prevVideo;
@@ -53,21 +52,20 @@ describe("Task 5: Honest Fallbacks", () => {
     expect(result.provider).toBe("flux-comfy");
   });
 
-  it("assigns tier 'animated-card' when final fallback is reached", async () => {
-    vi.spyOn(cloudinaryService, "uploadToCloudinary").mockResolvedValue(
-      "https://res.cloudinary.com/demo/image/upload/sample.png"
-    );
-    vi.spyOn(cloudinaryService, "uploadVideoToCloudinary").mockResolvedValue(
-      "https://res.cloudinary.com/demo/video/upload/sample.mp4"
-    );
+  it("sticks strictly to Gemini for video and throws an error without falling back when Gemini fails", async () => {
+    const prevKey = process.env.GEMINI_API_KEY;
+    delete process.env.GEMINI_API_KEY;
 
-    const res = await generateVideoWithModel({
-      imageUrl: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
-      occasion: "Birthday",
-      aiEngine: "non-existent-engine",
-    });
-
-    expect(res.tier).toBe("animated-card");
-    expect(res.model).toContain("Neural Dynamic Motion Engine");
+    try {
+      await expect(
+        generateVideoWithModel({
+          imageUrl: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+          occasion: "Birthday",
+          aiEngine: "gemini",
+        })
+      ).rejects.toThrow(/Gemini video generation failed.*switch to another AI video model/i);
+    } finally {
+      if (prevKey !== undefined) process.env.GEMINI_API_KEY = prevKey;
+    }
   });
 });

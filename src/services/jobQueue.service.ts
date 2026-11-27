@@ -155,10 +155,8 @@ export async function processWishJob(
         });
         videoUrl = videoRes.videoUrl;
       } catch (vidErr) {
-        if (chosenVideoModel === "svd" || data.aiEngine === "flux" || data.aiEngine === "svd") {
-          throw vidErr;
-        }
-        logger.warn({ wishId, err: vidErr }, "Video synthesis failed; falling back to image-only");
+        logger.error({ wishId, err: vidErr }, "Video synthesis failed (strict mode, no silent fallback)");
+        throw vidErr;
       }
     }
 

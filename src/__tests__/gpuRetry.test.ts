@@ -51,69 +51,89 @@ describe("Task 7: GPU Memory 503 Retry Handling", () => {
     expect(result.base64).toBe("base64GeneratedImageData");
   });
 
-  it("retries SVD video generation once after a 503 gpu_busy error and succeeds", async () => {
+  it("retries ComfyUI SVD video prompt submission once after a 503 gpu_busy error and succeeds", async () => {
+    process.env.COMFY_API_URL = "https://mock-comfy.trycloudflare.com";
     vi.spyOn(cloudinaryService, "uploadVideoToCloudinary").mockResolvedValue("https://cdn.cloudinary.com/test_video.mp4");
 
-    let callCount = 0;
+    let promptCalls = 0;
     vi.spyOn(axios, "post").mockImplementation(async (url: string) => {
-      if (url.includes("/generate-video")) {
-        callCount++;
-        if (callCount === 1) {
+      if (url.includes("/upload/image")) {
+        return { data: { name: "svd_init.png", subfolder: "", type: "input" } } as any;
+      }
+      if (url.includes("/prompt")) {
+        promptCalls++;
+        if (promptCalls === 1) {
           const err: any = new Error("Request failed with status code 503");
-          err.response = {
-            status: 503,
-            data: { error: "gpu_busy" },
-          };
+          err.response = { status: 503, data: { error: "gpu_busy" } };
           throw err;
         }
-        return {
-          status: 200,
-          data: JSON.stringify({
-            video: "base64VideoData",
-            mime_type: "video/mp4",
-            model: "Stable Video Diffusion (Colab T4 GPU)",
-          }),
-        } as any;
+        return { data: { prompt_id: "svd-retry-123" } } as any;
       }
       return { data: {} } as any;
     });
 
-    const result = await generateVideoWithModel({
-      imageUrl: "https://example.com/clean.png",
-      occasion: "Birthday",
+    vi.spyOn(axios, "get").mockImplementation(async (url: string) => {
+      if (url.includes("/object_info/CreateVideo")) return { status: 200, data: { CreateVideo: {} } } as any;
+      if (url.includes("/object_info/SaveVideo")) return { status: 200, data: { SaveVideo: {} } } as any;
+      if (url.includes("/history/svd-retry-123")) {
+        return {
+          data: {
+            "svd-retry-123": {
+              status: { completed: true },
+              outputs: { "7": { images: [{ filename: "out.mp4", subfolder: "", type: "output" }] } },
+            },
+          },
+        } as any;
+      }
+      if (url.includes("/view")) return { data: Buffer.from("fake-mp4-bytes") } as any;
+      return { data: {} } as any;
     });
 
-    expect(callCount).toBe(2);
+    const tinyPngDataUri =
+      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+    const result = await generateVideoWithModel({
+      imageUrl: tinyPngDataUri,
+      occasion: "Birthday",
+      aiEngine: "svd",
+    });
+
+    expect(promptCalls).toBe(2);
     expect(result.tier).toBe("ai-video");
     expect(result.videoUrl).toBe("https://cdn.cloudinary.com/test_video.mp4");
   });
 
-  it("falls back gracefully when 503 persists after retry in SVD", async () => {
-    vi.spyOn(cloudinaryService, "uploadToCloudinary").mockResolvedValue("https://cdn.cloudinary.com/img.png");
-    vi.spyOn(cloudinaryService, "generateDynamicMotionVideoUrl").mockReturnValue("https://cdn.cloudinary.com/animated.mp4");
+  it("throws a clear error without falling back when ComfyUI SVD 503 persists after retry", async () => {
+    process.env.COMFY_API_URL = "https://mock-comfy.trycloudflare.com";
 
-    let callCount = 0;
+    let promptCalls = 0;
     vi.spyOn(axios, "post").mockImplementation(async (url: string) => {
-      if (url.includes("/generate-video")) {
-        callCount++;
+      if (url.includes("/upload/image")) {
+        return { data: { name: "svd_init.png", subfolder: "", type: "input" } } as any;
+      }
+      if (url.includes("/prompt")) {
+        promptCalls++;
         const err: any = new Error("Request failed with status code 503");
-        err.response = {
-          status: 503,
-          data: { error: "gpu_busy" },
-        };
+        err.response = { status: 503, data: { error: "gpu_busy" } };
         throw err;
       }
       return { data: {} } as any;
     });
 
-    const result = await generateVideoWithModel({
-      imageUrl: "https://example.com/clean.png",
-      occasion: "Birthday",
-    });
+    vi.spyOn(axios, "get").mockResolvedValue({ status: 404, data: {} } as any);
 
-    expect(callCount).toBe(2); // Initial attempt + 1 retry
-    expect(result.tier).toBe("animated-card");
-    expect(result.model).toContain("Cloudinary");
+    const tinyPngDataUri =
+      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+
+    await expect(
+      generateVideoWithModel({
+        imageUrl: tinyPngDataUri,
+        occasion: "Birthday",
+        aiEngine: "svd",
+      })
+    ).rejects.toThrow(/FLUX \/ SVD video generation failed.*switch to another AI video model/i);
+
+    expect(promptCalls).toBe(2);
   });
 
   it("retries ComfyUI prompt submission once if ComfyUI returns 503 gpu_busy", async () => {
